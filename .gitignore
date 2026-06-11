@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# 虚拟环境
+gui_agent/
+venv/
+env/
+.venv/
+
+# 模型文件
+models/
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# 日志和临时文件
+logs/
+*.log
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+~$*.docx
+week1.docx
+pip_cache/
+test_env.py
+
+# Claude 本地设置
+.claude/
+CLAUDE.md
