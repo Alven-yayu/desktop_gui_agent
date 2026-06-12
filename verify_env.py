@@ -1,6 +1,18 @@
-"""Verify environment setup for Desktop GUI Agent"""
+# -*- coding: utf-8 -*-
+"""Verify environment setup for Desktop GUI Agent（环境验证脚本）"""
 import os
 import sys
+
+# ===== Windows 控制台 UTF-8 修复 =====
+# 只在真实控制台环境下替换 stdout（pytest/CI 环境跳过）。
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+    try:
+        import io
+        sys.stdout = io.TextIOWrapper(
+            sys.stdout.buffer, encoding="utf-8", errors="replace"
+        )
+    except (AttributeError, ValueError, OSError):
+        pass
 
 # Workaround for Windows SSL certificate store corruption
 import certifi

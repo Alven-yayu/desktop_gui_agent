@@ -37,6 +37,9 @@ week1.docx
 pip_cache/
 test_env.py
 
+# 测试缓存
+.pytest_cache/
+
 # Claude 本地设置
 .claude/
 CLAUDE.md

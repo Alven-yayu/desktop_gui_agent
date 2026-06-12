@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """感知模块测试 — screenshot + ocr_recognizer + ui_locator"""
 import pytest
 from PIL import Image

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # ===== SSL 证书修复 + PaddlePaddle 修复（Windows，必须放最前面）=====
 import os
 import ssl

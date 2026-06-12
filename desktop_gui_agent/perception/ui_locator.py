@@ -1,8 +1,10 @@
+# -*- coding: utf-8 -*-
 """UI 元素定位与可视化模块。
 
 基于 OCR 识别结果，查找屏幕上的 UI 元素，并支持在截图上可视化标注。
 """
 import os
+import sys
 from typing import Dict, List, Optional
 
 from PIL import Image, ImageDraw, ImageFont
@@ -12,6 +14,55 @@ from desktop_gui_agent.utils.exceptions import UILocatorError
 from desktop_gui_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ===== 中文字体查找 =====
+# PIL 默认字体不支持中文渲染，需找到支持中文的系统字体。
+# Windows: 按优先级搜索 微软雅黑 / 黑体 / 宋体
+# macOS: 苹方 / 黑体
+# Linux: Noto Sans CJK / WenQuanYi
+_CHINESE_FONT_CANDIDATES = []
+if sys.platform == "win32":
+    _CHINESE_FONT_CANDIDATES = [
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "msyh.ttc"),   # 微软雅黑
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "msyhbd.ttc"), # 微软雅黑粗体
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "simhei.ttf"), # 黑体
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "simsun.ttc"), # 宋体
+    ]
+elif sys.platform == "darwin":
+    _CHINESE_FONT_CANDIDATES = [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    ]
+else:
+    _CHINESE_FONT_CANDIDATES = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    ]
+
+
+def _get_chinese_font(size: int = 14) -> ImageFont.FreeTypeFont:
+    """查找并返回支持中文的字体。
+
+    按平台依次尝试常见中文字体，若全部缺失则回退到 PIL 默认字体。
+
+    Args:
+        size: 字体大小（像素）。
+
+    Returns:
+        ImageFont 对象（优先 FreeTypeFont，否则默认 bitmap 字体）。
+    """
+    for font_path in _CHINESE_FONT_CANDIDATES:
+        if os.path.isfile(font_path):
+            try:
+                return ImageFont.truetype(font_path, size=size)
+            except (OSError, IOError):
+                continue
+
+    # 全部失败时回退到 PIL 默认字体（中文会显示为方块，但不抛异常）
+    logger.warning("未找到中文字体，标注中的中文可能无法正常显示")
+    return ImageFont.load_default()
 
 
 class UILocator:
@@ -85,11 +136,8 @@ class UILocator:
         annotated = image.copy()
         draw = ImageDraw.Draw(annotated)
 
-        # 使用 PIL 默认字体
-        try:
-            font = ImageFont.truetype("arial.ttf", size=14)
-        except (OSError, IOError):
-            font = ImageFont.load_default()
+        # 查找支持中文的字体
+        font = _get_chinese_font(size=14)
 
         for item in ocr_results:
             bbox = item["bbox"]
