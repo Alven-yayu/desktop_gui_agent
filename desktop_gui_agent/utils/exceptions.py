@@ -9,3 +9,8 @@ class OCRError(Exception):
 class ScreenshotError(Exception):
     """截图失败（屏幕不存在等）"""
     pass
+
+
+class UILocatorError(Exception):
+    """UI 定位失败（空图片、OCR 结果异常等）"""
+    pass

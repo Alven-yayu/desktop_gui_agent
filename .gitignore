@@ -19,6 +19,7 @@ models/
 
 # 日志和临时文件
 logs/
+output/
 *.log
 *.tmp
 
