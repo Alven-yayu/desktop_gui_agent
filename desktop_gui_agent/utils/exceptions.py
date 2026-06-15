@@ -15,3 +15,8 @@ class ScreenshotError(Exception):
 class UILocatorError(Exception):
     """UI 定位失败（空图片、OCR 结果异常等）"""
     pass
+
+
+class ControlError(Exception):
+    """控制操作失败（坐标越界、权限不足、设备未连接等）"""
+    pass
