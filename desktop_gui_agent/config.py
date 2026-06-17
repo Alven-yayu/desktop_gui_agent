@@ -32,3 +32,8 @@ OCR_CONFIDENCE_THRESHOLD = 0.5  # 低于此置信度的识别结果丢弃
 MOUSE_MOVE_DURATION = 0.3  # 移动动画时长（秒），分段插值模拟平滑移动
 MOUSE_CLICK_DELAY = (0.05, 0.2)  # 点击后随机延迟范围 (min, max)，单位秒
 MOUSE_DRAG_DURATION = 0.5  # 默认拖拽时长（秒）
+
+# ===== 键盘控制配置 =====
+KEYBOARD_TYPE_DELAY = (0.03, 0.1)  # 字符间随机延迟范围 (min, max)，单位秒
+KEYBOARD_HOTKEY_DELAY = (0.05, 0.15)  # 组合键按下/释放间隔随机延迟范围，单位秒
+KEYBOARD_SCROLL_STEP = 120  # 每次滚动的像素量
