@@ -55,3 +55,146 @@ class TestAgentConfig:
         from desktop_gui_agent import config
         assert config.MODEL_API_URL is None or isinstance(config.MODEL_API_URL, str)
         assert config.MODEL_API_KEY is None or isinstance(config.MODEL_API_KEY, str)
+
+
+# ===== ActionParser 测试 =====
+
+class TestActionParser:
+    """action_parser.parse() 测试"""
+
+    # ---- click ----
+    def test_parse_click_with_coordinates(self):
+        """解析 click(x=100, y=200)"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("click(x=100, y=200)")
+        assert result["action_type"] == "click"
+        assert result["params"] == {"x": 100, "y": 200}
+
+    def test_parse_click_with_spaces(self):
+        """解析带空格的 click( x=300 , y=400 )"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("  click( x=300 , y=400 )  ")
+        assert result["action_type"] == "click"
+        assert result["params"] == {"x": 300, "y": 400}
+
+    def test_parse_click_case_insensitive(self):
+        """Click / CLICK 应该都能识别"""
+        from desktop_gui_agent.agent.action_parser import parse
+        assert parse("Click(x=10, y=20)")["action_type"] == "click"
+        assert parse("CLICK(x=10, y=20)")["action_type"] == "click"
+
+    # ---- type ----
+    def test_parse_type_english(self):
+        """解析 type(text="Hello")"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('type(text="Hello World")')
+        assert result["action_type"] == "type"
+        assert result["params"] == {"text": "Hello World"}
+
+    def test_parse_type_chinese(self):
+        """解析 type 含中文"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('type(text="你好世界")')
+        assert result["action_type"] == "type"
+        assert result["params"] == {"text": "你好世界"}
+
+    def test_parse_type_with_escaped_quotes(self):
+        """type 文本中含有转义引号"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse(r'type(text="He said \"hi\"")')
+        assert result["action_type"] == "type"
+        assert "He said" in result["params"]["text"]
+
+    # ---- scroll ----
+    def test_parse_scroll_up(self):
+        """解析 scroll(direction="up", steps=3)"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('scroll(direction="up", steps=3)')
+        assert result["action_type"] == "scroll"
+        assert result["params"] == {"direction": "up", "steps": 3}
+
+    def test_parse_scroll_down(self):
+        """解析 scroll(direction="down", steps=5)"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('scroll(direction="down", steps=5)')
+        assert result["action_type"] == "scroll"
+        assert result["params"] == {"direction": "down", "steps": 5}
+
+    # ---- hotkey ----
+    def test_parse_hotkey_two_keys(self):
+        """解析 hotkey(ctrl, c)"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("hotkey(ctrl, c)")
+        assert result["action_type"] == "hotkey"
+        assert result["params"] == {"keys": ["ctrl", "c"]}
+
+    def test_parse_hotkey_three_keys(self):
+        """解析 hotkey(ctrl, shift, esc)"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("hotkey(ctrl, shift, esc)")
+        assert result["action_type"] == "hotkey"
+        assert result["params"] == {"keys": ["ctrl", "shift", "esc"]}
+
+    def test_parse_hotkey_single_key(self):
+        """解析 hotkey(enter) — 单个按键也合法"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("hotkey(enter)")
+        assert result["action_type"] == "hotkey"
+        assert result["params"] == {"keys": ["enter"]}
+
+    # ---- finish ----
+    def test_parse_finish(self):
+        """解析 finish(result="任务完成")"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('finish(result="已成功打开记事本")')
+        assert result["action_type"] == "finish"
+        assert result["params"] == {"result": "已成功打开记事本"}
+
+    def test_parse_finish_empty_result(self):
+        """finish 结果可以为空"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('finish(result="")')
+        assert result["action_type"] == "finish"
+        assert result["params"] == {"result": ""}
+
+    # ---- 容错 ----
+    def test_parse_none_input(self):
+        """None 输入返回 unknown"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse(None)
+        assert result["action_type"] == "unknown"
+        assert "raw" in result
+
+    def test_parse_empty_string(self):
+        """空字符串返回 unknown"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("")
+        assert result["action_type"] == "unknown"
+
+    def test_parse_garbage_text(self):
+        """无法识别的文本返回 unknown"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("这是乱七八糟的输出")
+        assert result["action_type"] == "unknown"
+        assert result["raw"] == "这是乱七八糟的输出"
+
+    def test_parse_click_missing_y(self):
+        """click 缺少 y 参数应返回 unknown"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("click(x=100)")
+        assert result["action_type"] == "unknown"
+
+    def test_parse_only_first_action_when_multiple(self):
+        """多行动作只取第一个（单步单动作原则）"""
+        from desktop_gui_agent.agent.action_parser import parse
+        multi = 'click(x=10, y=20)\ntype(text="hello")'
+        result = parse(multi)
+        assert result["action_type"] == "click"
+        assert result["params"] == {"x": 10, "y": 20}
+
+    def test_parse_scroll_default_steps(self):
+        """scroll 未指定 steps 时默认 1"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('scroll(direction="down")')
+        assert result["action_type"] == "scroll"
+        assert result["params"]["steps"] == 1
