@@ -198,3 +198,135 @@ class TestActionParser:
         result = parse('scroll(direction="down")')
         assert result["action_type"] == "scroll"
         assert result["params"]["steps"] == 1
+
+
+# ===== ModelClient 测试 =====
+from unittest.mock import patch, MagicMock
+from PIL import Image
+
+
+@pytest.fixture
+def sample_screenshot():
+    """创建一张测试用的截图"""
+    return Image.new("RGB", (800, 600), color=(100, 150, 200))
+
+
+class TestModelClientInit:
+    """ModelClient 初始化测试"""
+
+    def test_init_default_local_mode(self):
+        """默认应该是 local 模式"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        client = ModelClient()
+        assert client.mode == "local"
+
+    def test_init_api_mode(self):
+        """可以通过参数指定 api 模式"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        client = ModelClient(mode="api", api_url="http://test:8080")
+        assert client.mode == "api"
+
+    def test_init_raises_on_invalid_mode(self):
+        """非法模式应抛 ModelError"""
+        import pytest
+        from desktop_gui_agent.agent.model_client import ModelClient
+        from desktop_gui_agent.utils.exceptions import ModelError
+        with pytest.raises(ModelError):
+            ModelClient(mode="invalid_mode")
+
+
+class TestModelClientQuery:
+    """ModelClient.query() 测试"""
+
+    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
+    @patch('desktop_gui_agent.agent.model_client._load_local_model')
+    def test_query_local_returns_string(self, mock_load, mock_pvi, sample_screenshot):
+        """本地模式 query 应返回字符串"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        # mock 模型和处理器
+        mock_model = MagicMock()
+        mock_model.device = "cpu"
+        mock_processor = MagicMock()
+        mock_processor.apply_chat_template.return_value = "chat template output"
+        mock_processor.batch_decode.return_value = ["click(x=100, y=200)"]
+        mock_load.return_value = (mock_model, mock_processor)
+        mock_pvi.return_value = ([], [])
+
+        client = ModelClient(mode="local")
+        result = client.query(sample_screenshot, "点击确定按钮")
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
+    @patch('desktop_gui_agent.agent.model_client._load_local_model')
+    def test_query_includes_task_in_prompt(self, mock_load, mock_pvi, sample_screenshot):
+        """query 应该把任务描述放入 prompt"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        mock_model = MagicMock()
+        mock_model.device = "cpu"
+        mock_processor = MagicMock()
+        mock_processor.apply_chat_template.return_value = "chat template output"
+        mock_processor.batch_decode.return_value = ["finish(result=\"done\")"]
+        mock_load.return_value = (mock_model, mock_processor)
+        mock_pvi.return_value = ([], [])
+
+        client = ModelClient(mode="local")
+        result = client.query(sample_screenshot, "打开记事本")
+        # 验证模型被调用时 prompt 包含任务
+        call_args = mock_processor.apply_chat_template.call_args
+        assert call_args is not None
+
+    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
+    @patch('desktop_gui_agent.agent.model_client._load_local_model')
+    def test_query_with_context(self, mock_load, mock_pvi, sample_screenshot):
+        """带历史动作的 query 应包含上下文"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        mock_model = MagicMock()
+        mock_model.device = "cpu"
+        mock_processor = MagicMock()
+        mock_processor.apply_chat_template.return_value = "chat template output"
+        mock_processor.batch_decode.return_value = ["type(text=\"hello\")"]
+        mock_load.return_value = (mock_model, mock_processor)
+        mock_pvi.return_value = ([], [])
+
+        client = ModelClient(mode="local")
+        context = ["click(x=100, y=200)", "type(text=\"hello\")"]
+        result = client.query(sample_screenshot, "继续操作", context=context)
+        assert isinstance(result, str)
+
+    @patch('desktop_gui_agent.agent.model_client.requests.post')
+    def test_query_api_mode_returns_string(self, mock_post, sample_screenshot):
+        """API 模式 query 应返回字符串"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "finish(result=\"ok\")"}}]
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_post.return_value = mock_response
+
+        client = ModelClient(mode="api", api_url="http://test:8080/v1")
+        result = client.query(sample_screenshot, "完成任务")
+        assert isinstance(result, str)
+
+    @patch('desktop_gui_agent.agent.model_client.requests.post')
+    def test_query_api_retry_on_failure(self, mock_post, sample_screenshot):
+        """API 调用失败时应重试一次"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        from desktop_gui_agent.utils.exceptions import ModelError
+        mock_post.side_effect = Exception("网络错误")
+
+        client = ModelClient(mode="api", api_url="http://test:8080/v1")
+        with pytest.raises(ModelError):
+            client.query(sample_screenshot, "测试任务")
+        # 应该调用了两次（原始 + 重试）
+        assert mock_post.call_count == 2
+
+    def test_query_with_none_image(self, sample_screenshot):
+        """None 截图应抛 ModelError"""
+        import pytest
+        from desktop_gui_agent.agent.model_client import ModelClient
+        from desktop_gui_agent.utils.exceptions import ModelError
+        client = ModelClient(mode="local")
+        with pytest.raises(ModelError):
+            client.query(None, "测试任务")
