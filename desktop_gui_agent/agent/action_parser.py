@@ -79,20 +79,24 @@ def parse(model_output: Optional[str]) -> Dict[str, Any]:
 
 
 def _build_click_params(match: re.Match) -> Dict[str, int]:
+    """从正则匹配结果构建 click 参数字典。"""
     return {"x": int(match.group(1)), "y": int(match.group(2))}
 
 
 def _build_type_params(match: re.Match) -> Dict[str, str]:
+    """从正则匹配结果构建 type 参数字典。"""
     return {"text": match.group(1)}
 
 
 def _build_scroll_params(match: re.Match) -> Dict[str, Any]:
+    """从正则匹配结果构建 scroll 参数字典。"""
     direction = match.group(1)
     steps = int(match.group(2)) if match.group(2) else 1
     return {"direction": direction, "steps": steps}
 
 
 def _build_hotkey_params(match: re.Match) -> Dict[str, list]:
+    """从正则匹配结果构建 hotkey 参数字典。"""
     # 逗号分隔每个按键名，去除空白和引号
     keys_str = match.group(1)
     keys = [k.strip().strip('"').strip("'") for k in keys_str.split(",") if k.strip()]
@@ -100,6 +104,7 @@ def _build_hotkey_params(match: re.Match) -> Dict[str, list]:
 
 
 def _build_finish_params(match: re.Match) -> Dict[str, str]:
+    """从正则匹配结果构建 finish 参数字典。"""
     return {"result": match.group(1)}
 
 
