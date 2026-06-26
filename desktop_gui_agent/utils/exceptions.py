@@ -20,3 +20,8 @@ class UILocatorError(Exception):
 class ControlError(Exception):
     """控制操作失败（坐标越界、权限不足、设备未连接等）"""
     pass
+
+
+class ModelError(Exception):
+    """模型推理失败（模型加载失败、推理超时、API调用失败等）"""
+    pass

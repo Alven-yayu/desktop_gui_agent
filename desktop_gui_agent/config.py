@@ -37,3 +37,15 @@ MOUSE_DRAG_DURATION = 0.5  # 默认拖拽时长（秒）
 KEYBOARD_TYPE_DELAY = (0.03, 0.1)  # 字符间随机延迟范围 (min, max)，单位秒
 KEYBOARD_HOTKEY_DELAY = (0.05, 0.15)  # 组合键按下/释放间隔随机延迟范围，单位秒
 KEYBOARD_SCROLL_STEP = 120  # 每次滚动的像素量
+
+# ===== Agent 模型配置 =====
+MODEL_NAME = "Qwen/Qwen2-VL-2B-Instruct"  # 本地模型名称或 HuggingFace 路径
+MODEL_MODE = "local"  # 推理模式："local"（本地 Transformers）或 "api"（远程 API）
+MODEL_API_URL = None  # API 端点 URL（仅 api 模式使用）
+MODEL_API_KEY = None  # API 密钥（仅 api 模式使用）
+MODEL_MAX_TOKENS = 512  # 单次推理最大输出 token 数
+
+# ===== Agent 主循环配置 =====
+AGENT_MAX_STEPS = 20  # 默认最大步数上限
+AGENT_MAX_CONSECUTIVE_ERRORS = 3  # 连续错误次数阈值，超限则终止
+AGENT_STEP_DELAY = (0.5, 2.0)  # 步骤间随机延迟范围 (min, max)，单位秒
