@@ -293,6 +293,18 @@ class TestModelClientQuery:
         context = ["click(x=100, y=200)", "type(text=\"hello\")"]
         result = client.query(sample_screenshot, "继续操作", context=context)
         assert isinstance(result, str)
+        # 验证上下文确实被注入到 prompt 中
+        call_args = mock_processor.apply_chat_template.call_args
+        messages = call_args[0][0]  # 第一个位置参数是 messages 列表
+        # 找到 user 消息的 content 列表中的 text 内容
+        user_content_text = ""
+        for msg in messages:
+            if msg["role"] == "user":
+                for item in msg["content"]:
+                    if item["type"] == "text":
+                        user_content_text += item["text"]
+        assert "click(x=100, y=200)" in user_content_text
+        assert "type(text=\"hello\")" in user_content_text
 
     @patch('desktop_gui_agent.agent.model_client.requests.post')
     def test_query_api_mode_returns_string(self, mock_post, sample_screenshot):

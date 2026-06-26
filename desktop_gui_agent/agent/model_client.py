@@ -13,11 +13,6 @@ from typing import Optional
 import requests
 from PIL import Image
 
-try:
-    from qwen_vl_utils import process_vision_info
-except ImportError:
-    process_vision_info = None
-
 from desktop_gui_agent.config import (
     MODEL_API_KEY,
     MODEL_API_URL,
@@ -29,6 +24,12 @@ from desktop_gui_agent.utils.exceptions import ModelError
 from desktop_gui_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+try:
+    from qwen_vl_utils import process_vision_info
+except ImportError:
+    process_vision_info = None
+    logger.warning("qwen-vl-utils 未安装，本地推理将不可用。请运行: pip install qwen-vl-utils")
 
 # ===== Prompt 模板 =====
 
@@ -144,6 +145,11 @@ class ModelClient:
             text = self._processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
+            if process_vision_info is None:
+                raise ModelError(
+                    "qwen-vl-utils 未安装，无法进行本地推理。"
+                    "请运行: pip install qwen-vl-utils"
+                )
             image_inputs, video_inputs = process_vision_info(messages)
 
             inputs = self._processor(
