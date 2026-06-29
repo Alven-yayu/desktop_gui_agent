@@ -8,7 +8,8 @@ import random
 import time
 from typing import Optional
 
-from pynput.mouse import Button, Controller as MouseController
+from pynput.mouse import Button
+from pynput.mouse import Controller as PynputMouse
 
 from desktop_gui_agent.config import (
     MOUSE_CLICK_DELAY,
@@ -37,7 +38,7 @@ class MouseController:
         Args:
             move_duration: 平滑移动的默认时长（秒）。
         """
-        self._mouse = MouseController()
+        self._mouse = PynputMouse()
         self.move_duration = move_duration
         logger.info("鼠标控制器初始化完成")
 

@@ -16,6 +16,18 @@ def _patched_create_default_context(*args, **kwargs):
 
 ssl.create_default_context = _patched_create_default_context
 
+# ===== 提前加载 torch（Windows DLL 加载顺序要求）=====
+try:
+    import torch  # noqa: F401  # 必须在其他 C 扩展之前加载
+except ImportError:
+    pass
+
+# ===== HuggingFace 缓存路径 + 镜像（国内加速）=====
+if "HF_HOME" not in os.environ:
+    os.environ["HF_HOME"] = "D:/models/huggingface"
+if "HF_ENDPOINT" not in os.environ:
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 # ===== 截图配置 =====
 SCREEN_ID = 0  # 默认屏幕ID，0表示主屏幕
 SCREENSHOT_REGION = None  # 截图区域 (x, y, width, height)，None 表示全屏

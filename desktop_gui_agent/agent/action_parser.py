@@ -96,10 +96,20 @@ def _build_scroll_params(match: re.Match) -> Dict[str, Any]:
 
 
 def _build_hotkey_params(match: re.Match) -> Dict[str, list]:
-    """从正则匹配结果构建 hotkey 参数字典。"""
-    # 逗号分隔每个按键名，去除空白和引号
+    """从正则匹配结果构建 hotkey 参数字典。
+
+    支持三种格式：
+    - hotkey(ctrl, c)      逗号分隔
+    - hotkey(\"ctrl\", \"c\")  带引号逗号分隔
+    - hotkey(\"ctrl+c\")     加号连接（模型有时会这样输出）
+    """
     keys_str = match.group(1)
-    keys = [k.strip().strip('"').strip("'") for k in keys_str.split(",") if k.strip()]
+    # 先尝试逗号分隔
+    if "," in keys_str:
+        keys = [k.strip().strip('"').strip("'") for k in keys_str.split(",") if k.strip()]
+    else:
+        # 否则按 + 分隔（处理 "win+r" 格式）
+        keys = [k.strip().strip('"').strip("'") for k in keys_str.split("+") if k.strip()]
     return {"keys": keys}
 
 

@@ -88,6 +88,28 @@ class ModelClient:
 
         logger.info(f"ModelClient 初始化，模式: {self.mode}，模型: {self.model_name}")
 
+    # 模型输入图片最大边长（像素），超过则等比缩放
+    # 2B 模型在 8GB 显存下安全值，过大易 OOM
+    _MAX_IMAGE_SIZE = 896
+
+    @staticmethod
+    def _resize_image(image: Image.Image, max_size: int = _MAX_IMAGE_SIZE) -> Image.Image:
+        """将图片等比缩放到最大边长以内，避免显存溢出。
+
+        Args:
+            image: 原始截图。
+            max_size: 最大边长（像素）。
+
+        Returns:
+            缩放后的图片。
+        """
+        w, h = image.size
+        if max(w, h) <= max_size:
+            return image
+        ratio = max_size / max(w, h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+        return image.resize((new_w, new_h), Image.LANCZOS)
+
     def query(
         self,
         image: Image.Image,
@@ -109,6 +131,9 @@ class ModelClient:
         """
         if image is None:
             raise ModelError("输入截图不能为 None")
+
+        # 压缩大图，防止显存溢出
+        image = self._resize_image(image)
 
         user_prompt = _USER_PROMPT_TEMPLATE.format(task=task)
 
