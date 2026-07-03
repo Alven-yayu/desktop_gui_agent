@@ -61,3 +61,31 @@ MODEL_MAX_TOKENS = 512  # 单次推理最大输出 token 数
 AGENT_MAX_STEPS = 20  # 默认最大步数上限
 AGENT_MAX_CONSECUTIVE_ERRORS = 3  # 连续错误次数阈值，超限则终止
 AGENT_STEP_DELAY = (0.5, 2.0)  # 步骤间随机延迟范围 (min, max)，单位秒
+
+# ===== Prompt 模板配置 =====
+PROMPT_SYSTEM = """你是桌面GUI智能体。根据截图和任务，输出下一步操作。
+
+有效动作：
+- click(x=<int>, y=<int>)           # 点击指定坐标
+- type(text="<str>")                 # 输入文本
+- scroll(direction="up|down", steps=<int>)  # 滚动
+- hotkey(key1, key2, ...)            # 组合键
+- finish(result="<str>")             # 任务完成
+
+请根据当前截图，输出下一步需要执行的一个动作。只输出动作本身，不要解释。"""
+
+PROMPT_USER_TEMPLATE = "用户任务：{task}\n请输出下一步动作："
+
+PROMPT_FEW_SHOT_EXAMPLES = [
+    """示例1:
+任务: "打开记事本"
+屏幕: 显示 Windows 桌面，底部有任务栏，左侧有开始按钮
+动作: click(x=150, y=300)""",
+
+    """示例2:
+任务: "在搜索框输入Python"
+屏幕: 显示已打开的开始菜单，搜索框可见且有光标
+动作: type(text="Python")""",
+]
+
+PROMPT_COT_ENABLED = True
