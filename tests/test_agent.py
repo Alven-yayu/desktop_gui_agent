@@ -21,6 +21,68 @@ class TestModelError:
         assert "模型加载失败" in str(exc_info.value)
 
 
+# ===== 错误分类测试（Phase 5）=====
+
+class TestErrorCategory:
+    """classify_error() 测试"""
+
+    def test_screenshot_error_is_retryable(self):
+        """ScreenshotError 应归类为 RETRYABLE"""
+        from desktop_gui_agent.utils.exceptions import ScreenshotError, classify_error, ErrorCategory
+        assert classify_error(ScreenshotError("截图失败")) == ErrorCategory.RETRYABLE
+
+    def test_ocr_error_is_skip(self):
+        """OCRError 应归类为 SKIP"""
+        from desktop_gui_agent.utils.exceptions import OCRError, classify_error, ErrorCategory
+        assert classify_error(OCRError("OCR失败")) == ErrorCategory.SKIP
+
+    def test_model_error_loading_is_fatal(self):
+        """模型加载失败的 ModelError 应归类为 FATAL"""
+        from desktop_gui_agent.utils.exceptions import ModelError, classify_error, ErrorCategory
+        err = ModelError("本地模型加载失败")
+        assert classify_error(err) == ErrorCategory.FATAL
+
+    def test_model_error_api_retry_is_skip(self):
+        """API 重试失败的 ModelError 应归类为 SKIP"""
+        from desktop_gui_agent.utils.exceptions import ModelError, classify_error, ErrorCategory
+        err = ModelError("API 调用失败（已重试）")
+        assert classify_error(err) == ErrorCategory.SKIP
+
+    def test_connection_error_is_retryable(self):
+        """ConnectionError 应归类为 RETRYABLE"""
+        from desktop_gui_agent.utils.exceptions import classify_error, ErrorCategory
+        import requests
+        try:
+            # 触发一个 ConnectionError
+            raise requests.ConnectionError("连接失败")
+        except requests.ConnectionError as e:
+            assert classify_error(e) == ErrorCategory.RETRYABLE
+
+    def test_timeout_error_is_retryable(self):
+        """Timeout 应归类为 RETRYABLE"""
+        from desktop_gui_agent.utils.exceptions import classify_error, ErrorCategory
+        import requests
+        try:
+            raise requests.Timeout("超时")
+        except requests.Timeout as e:
+            assert classify_error(e) == ErrorCategory.RETRYABLE
+
+    def test_generic_exception_is_skip(self):
+        """未知异常保守归类为 SKIP"""
+        from desktop_gui_agent.utils.exceptions import classify_error, ErrorCategory
+        assert classify_error(ValueError("未知错误")) == ErrorCategory.SKIP
+
+    def test_control_error_is_skip(self):
+        """ControlError 应归类为 SKIP"""
+        from desktop_gui_agent.utils.exceptions import ControlError, classify_error, ErrorCategory
+        assert classify_error(ControlError("坐标越界")) == ErrorCategory.SKIP
+
+    def test_ui_locator_error_is_skip(self):
+        """UILocatorError 应归类为 SKIP"""
+        from desktop_gui_agent.utils.exceptions import UILocatorError, classify_error, ErrorCategory
+        assert classify_error(UILocatorError("空图片")) == ErrorCategory.SKIP
+
+
 # ===== 配置项测试 =====
 
 class TestAgentConfig:
