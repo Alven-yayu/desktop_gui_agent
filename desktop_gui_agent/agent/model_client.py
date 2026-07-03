@@ -20,6 +20,8 @@ from desktop_gui_agent.config import (
     MODEL_MODE,
     MODEL_NAME,
 )
+
+import desktop_gui_agent.config as _config
 from desktop_gui_agent.utils.exceptions import ModelError
 from desktop_gui_agent.utils.logger import get_logger
 
@@ -32,19 +34,7 @@ except ImportError:
     logger.warning("qwen-vl-utils 未安装，本地推理将不可用。请运行: pip install qwen-vl-utils")
 
 # ===== Prompt 模板 =====
-
-_SYSTEM_PROMPT = """你是桌面GUI智能体。根据截图和任务，输出下一步操作。
-
-有效动作：
-- click(x=<int>, y=<int>)           # 点击指定坐标
-- type(text="<str>")                 # 输入文本
-- scroll(direction="up|down", steps=<int>)  # 滚动
-- hotkey(key1, key2, ...)            # 组合键
-- finish(result="<str>")             # 任务完成
-
-请根据当前截图，输出下一步需要执行的一个动作。只输出动作本身，不要解释。"""
-
-_USER_PROMPT_TEMPLATE = "用户任务：{task}\n请输出下一步动作："
+# 从 config.py 读取，如需自定义可在 config.py 中修改
 
 
 class ModelClient:
@@ -135,7 +125,11 @@ class ModelClient:
         # 压缩大图，防止显存溢出
         image = self._resize_image(image)
 
-        user_prompt = _USER_PROMPT_TEMPLATE.format(task=task)
+        user_prompt = _config.PROMPT_USER_TEMPLATE.format(task=task)
+
+        # CoT 推理引导（可通过配置关闭）
+        if _config.PROMPT_COT_ENABLED:
+            user_prompt += "\n请先简述屏幕上看到的关键元素（1句话），然后输出下一步动作。"
 
         if context:
             history_lines = "\n".join(f"  步骤{i+1}: {act}" for i, act in enumerate(context))
@@ -155,8 +149,13 @@ class ModelClient:
 
         try:
             # 构建 Qwen2-VL 的标准输入格式
+            # 拼接系统提示词 + few-shot 示例
+            system_content = _config.PROMPT_SYSTEM
+            if _config.PROMPT_FEW_SHOT_EXAMPLES:
+                system_content += "\n\n" + "\n\n".join(_config.PROMPT_FEW_SHOT_EXAMPLES)
+
             messages = [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {
                     "role": "user",
                     "content": [
@@ -217,6 +216,11 @@ class ModelClient:
         if not self.api_url:
             raise ModelError("API 模式需要配置 MODEL_API_URL")
 
+        # 拼接系统提示词 + few-shot 示例
+        system_content = _config.PROMPT_SYSTEM
+        if _config.PROMPT_FEW_SHOT_EXAMPLES:
+            system_content += "\n\n" + "\n\n".join(_config.PROMPT_FEW_SHOT_EXAMPLES)
+
         # PIL Image → base64
         buf = io.BytesIO()
         image.save(buf, format="PNG")
@@ -229,7 +233,7 @@ class ModelClient:
         payload = {
             "model": self.model_name,
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {
                     "role": "user",
                     "content": [

@@ -855,3 +855,124 @@ class TestMain:
 
         assert exit_code == 0
         mock_tm.run.assert_called_once_with("用户输入的任务")
+
+
+# ===== Prompt 拼接测试 =====
+
+class TestPromptBuilding:
+    """Prompt 模板拼接测试（Phase 5）"""
+
+    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
+    @patch('desktop_gui_agent.agent.model_client._load_local_model')
+    def test_few_shot_examples_injected(self, mock_load, mock_pvi):
+        """few-shot 示例应被注入到系统提示词中"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        from PIL import Image
+
+        mock_model = MagicMock()
+        mock_model.device = "cpu"
+        mock_processor = MagicMock()
+        mock_processor.apply_chat_template.return_value = "chat template"
+        mock_processor.batch_decode.return_value = ["click(x=100, y=200)"]
+        mock_load.return_value = (mock_model, mock_processor)
+        mock_pvi.return_value = ([], [])
+
+        client = ModelClient(mode="local")
+        client.query(Image.new("RGB", (100, 100)), "打开记事本")
+
+        call_args = mock_processor.apply_chat_template.call_args
+        messages = call_args[0][0]
+        system_content = ""
+        for msg in messages:
+            if msg["role"] == "system":
+                system_content = msg["content"]
+        assert "示例1" in system_content
+        assert "打开记事本" in system_content
+
+    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
+    @patch('desktop_gui_agent.agent.model_client._load_local_model')
+    def test_cot_guidance_in_user_prompt(self, mock_load, mock_pvi):
+        """CoT 引导文本应出现在 user prompt 中"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        from PIL import Image
+
+        mock_model = MagicMock()
+        mock_model.device = "cpu"
+        mock_processor = MagicMock()
+        mock_processor.apply_chat_template.return_value = "chat template"
+        mock_processor.batch_decode.return_value = ["finish(result=\"ok\")"]
+        mock_load.return_value = (mock_model, mock_processor)
+        mock_pvi.return_value = ([], [])
+
+        client = ModelClient(mode="local")
+        client.query(Image.new("RGB", (100, 100)), "测试")
+
+        call_args = mock_processor.apply_chat_template.call_args
+        messages = call_args[0][0]
+        user_text = ""
+        for msg in messages:
+            if msg["role"] == "user":
+                for item in msg["content"]:
+                    if item["type"] == "text":
+                        user_text += item["text"]
+        assert "简述" in user_text
+
+    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
+    @patch('desktop_gui_agent.agent.model_client._load_local_model')
+    def test_cot_disabled_skips_guidance(self, mock_load, mock_pvi):
+        """PROMPT_COT_ENABLED=False 时应不含 CoT 引导"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        from PIL import Image
+        import desktop_gui_agent.config as config
+
+        mock_model = MagicMock()
+        mock_model.device = "cpu"
+        mock_processor = MagicMock()
+        mock_processor.apply_chat_template.return_value = "chat template"
+        mock_processor.batch_decode.return_value = ["click(x=1, y=1)"]
+        mock_load.return_value = (mock_model, mock_processor)
+        mock_pvi.return_value = ([], [])
+
+        # 临时关闭 CoT
+        old_cot = config.PROMPT_COT_ENABLED
+        config.PROMPT_COT_ENABLED = False
+        try:
+            client = ModelClient(mode="local")
+            client.query(Image.new("RGB", (100, 100)), "测试")
+
+            call_args = mock_processor.apply_chat_template.call_args
+            messages = call_args[0][0]
+            user_text = ""
+            for msg in messages:
+                if msg["role"] == "user":
+                    for item in msg["content"]:
+                        if item["type"] == "text":
+                            user_text += item["text"]
+            assert "简述" not in user_text
+        finally:
+            config.PROMPT_COT_ENABLED = old_cot
+
+    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
+    @patch('desktop_gui_agent.agent.model_client._load_local_model')
+    def test_empty_few_shot_examples_skips_injection(self, mock_load, mock_pvi):
+        """FEW_SHOT_EXAMPLES 为空列表时不报错"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        from PIL import Image
+        import desktop_gui_agent.config as config
+
+        mock_model = MagicMock()
+        mock_model.device = "cpu"
+        mock_processor = MagicMock()
+        mock_processor.apply_chat_template.return_value = "chat template"
+        mock_processor.batch_decode.return_value = ["finish(result=\"ok\")"]
+        mock_load.return_value = (mock_model, mock_processor)
+        mock_pvi.return_value = ([], [])
+
+        old_examples = config.PROMPT_FEW_SHOT_EXAMPLES
+        config.PROMPT_FEW_SHOT_EXAMPLES = []
+        try:
+            client = ModelClient(mode="local")
+            result = client.query(Image.new("RGB", (100, 100)), "测试")
+            assert isinstance(result, str)
+        finally:
+            config.PROMPT_FEW_SHOT_EXAMPLES = old_examples
