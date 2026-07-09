@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """日志记录模块 — PDF 4.4.3"""
 import logging
+import logging.handlers
 import os
 import sys
 from datetime import datetime
@@ -65,12 +66,15 @@ def get_logger(name: str) -> logging.Logger:
     console.setFormatter(fmt)
     logger.addHandler(console)
 
-    # 文件（自动创建 logs/ 目录）
+    # 文件（自动创建 logs/ 目录，带轮转：单文件最大 10MB，保留 3 个备份）
     from desktop_gui_agent.utils.platform import PlatformInfo
     log_dir = PlatformInfo.get_log_dir()
     today = datetime.now().strftime("%Y-%m-%d")
-    file_handler = logging.FileHandler(
-        os.path.join(log_dir, f"{today}.log"), encoding="utf-8"
+    file_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(log_dir, f"{today}.log"),
+        encoding="utf-8",
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=3,
     )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(fmt)

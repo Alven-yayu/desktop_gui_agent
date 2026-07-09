@@ -25,6 +25,11 @@ import desktop_gui_agent.config as _config
 from desktop_gui_agent.utils.exceptions import ModelError
 from desktop_gui_agent.utils.logger import get_logger
 
+# ===== 双层 AI 架构常量 =====
+# 判断层和执行层分开，脑子管策略，手管精确坐标
+_EXECUTOR_MAX_TOKENS = 128  # 执行层输出极短（只需一个动作），防止长篇生成卡住
+_JUDGE_MAX_TOKENS = _config.MODEL_MAX_TOKENS_JUDGE  # 判断层输出更短
+
 logger = get_logger(__name__)
 
 try:
@@ -54,14 +59,23 @@ class ModelClient:
         model_name: Optional[str] = None,
         api_url: Optional[str] = None,
         api_key: Optional[str] = None,
+        # 判断层参数（双层架构）
+        judge_mode: Optional[str] = None,
+        judge_model_name: Optional[str] = None,
+        judge_api_url: Optional[str] = None,
+        judge_api_key: Optional[str] = None,
     ):
         """初始化模型客户端。
 
         Args:
             mode: 推理模式，"local" 或 "api"。
-            model_name: 模型名称，None 则使用 config.MODEL_NAME。
-            api_url: API 端点，None 则使用 config.MODEL_API_URL。
-            api_key: API 密钥，None 则使用 config.MODEL_API_KEY。
+            model_name: 模型名称，None 则使用 config.MODEL_NAME（执行层）。
+            api_url: API 端点，None 则使用 config.MODEL_API_URL（执行层）。
+            api_key: API 密钥，None 则使用 config.MODEL_API_KEY（执行层）。
+            judge_mode: 判断层推理模式，None 则使用 config.MODEL_MODE_JUDGE。
+            judge_model_name: 判断层模型，None 则使用 config.MODEL_NAME_JUDGE。
+            judge_api_url: 判断层 API 端点，None 则使用 config.MODEL_API_URL_JUDGE。
+            judge_api_key: 判断层 API 密钥，None 则使用 config.MODEL_API_KEY_JUDGE。
 
         Raises:
             ModelError: 模式不合法或模型加载失败。
@@ -76,7 +90,19 @@ class ModelClient:
         self._model = None
         self._processor = None
 
+        # 判断层配置
+        self.judge_mode = judge_mode or _config.MODEL_MODE_JUDGE
+        self.judge_model_name = judge_model_name or _config.MODEL_NAME_JUDGE
+        self.judge_api_url = judge_api_url or _config.MODEL_API_URL_JUDGE
+        self.judge_api_key = judge_api_key or _config.MODEL_API_KEY_JUDGE
+        self._judge_model = None
+        self._judge_processor = None
+
         logger.info(f"ModelClient 初始化，模式: {self.mode}，模型: {self.model_name}")
+        if _config.TWO_STAGE_ENABLED:
+            logger.info(
+                f"双层架构已启用，判断层: {self.judge_model_name} ({self.judge_mode})"
+            )
 
     # 模型输入图片最大边长（像素），超过则等比缩放
     # 2B 模型在 8GB 显存下安全值，过大易 OOM
@@ -100,21 +126,139 @@ class ModelClient:
         new_w, new_h = int(w * ratio), int(h * ratio)
         return image.resize((new_w, new_h), Image.LANCZOS)
 
+    # ===== Prompt 构建辅助方法 =====
+
+    @staticmethod
+    def _build_system_prompt() -> str:
+        """构建系统提示词（含 few-shot 示例）。"""
+        system = _config.PROMPT_SYSTEM
+        if _config.PROMPT_FEW_SHOT_EXAMPLES:
+            system += "\n\n" + "\n\n".join(_config.PROMPT_FEW_SHOT_EXAMPLES)
+        return system
+
+    # OCR 噪声过滤 —— 终端/CLI 文字和 agent 自己的 UI
+    _OCR_NOISE_PATTERNS = [
+        # Agent 自己的 UI
+        "桌面GUI智能体", "输入任务开始", "输入 exit 退出",
+        "已退出", ">>>", "❌ 未完成", "✅ 完成",
+        "开始任务:", "任务历史已保存",
+        # 日志输出碎片
+        "| INFO", "| WARNING", "| ERROR", "| DEBUG",
+        "desktop_gui_agent", "model_client",
+        # PowerShell / CMD 提示符
+        "PS D:", "PS C:", "PS E:", "C:\\Users", "C:\\Windows",
+        # CLI 错误消息关键词
+        "can't open", "No such file", "Errno", "Traceback",
+        "ModuleNotFoundError", "Error:", "exit code",
+    ]
+
+    @staticmethod
+    def _is_ocr_noise(text: str, task: str = "") -> bool:
+        """判断 OCR 文字是否为噪声（终端/CLI/agent UI）。"""
+        # 1. 匹配已知噪声模式
+        noise = list(ModelClient._OCR_NOISE_PATTERNS)
+        if task:
+            noise.append(task)
+        if any(n in text for n in noise):
+            return True
+        # 2. 路径特征：包含反斜杠或正斜杠+字母（如 D:\ 或 agent/gui）
+        if "\\" in text or ("/" in text and any(c.isalpha() for c in text)):
+            return True
+        # 3. 冒号路径（D:、C:）
+        import re
+        if re.search(r'[A-Z]:[\\/]', text):
+            return True
+        # 4. 太短（1-2 字符碎片，往往是噪声）
+        if len(text.strip()) <= 2:
+            return True
+        # 5. 纯标点/特殊字符
+        if re.match(r'^[\s\-_=#*.:;,/\\|><]+$', text):
+            return True
+        return False
+
+    @staticmethod
+    def _build_ocr_text(ocr_results: list, include_coords: bool = True,
+                        max_items: int = 30, task: str = "") -> str:
+        """将 OCR 结果格式化为 prompt 文本。
+
+        自动过滤掉终端/CLI/agent UI 噪声文字。
+
+        Args:
+            ocr_results: OCR 结果列表。
+            include_coords: True=含坐标（给执行层用），False=纯文字（给判断层用）。
+            max_items: 最多取前 N 条。
+            task: 当前用户任务文本，也会被过滤。
+        """
+        if not ocr_results:
+            return ""
+        lines = []
+        for item in ocr_results[:max_items]:
+            text = item["text"]
+            if ModelClient._is_ocr_noise(text, task):
+                continue
+            if include_coords:
+                x1, y1, x2, y2 = item["bbox"]
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                lines.append(f'  "{text}" 中心({cx},{cy})')
+            else:
+                lines.append(f'  "{text}"')
+        if not lines:
+            return ""
+        header = (
+            "【OCR识别结果】屏幕上的文字元素及其精确坐标："
+            if include_coords
+            else "【OCR识别结果】屏幕上的文字元素："
+        )
+        return "\n" + header + "\n" + "\n".join(lines) + "\n"
+
+    def _build_user_prompt(
+        self, task: str, context: list = None, ocr_results: list = None,
+        cot_enabled: bool = True, extra_text: str = "",
+    ) -> str:
+        """构建用户提示词。"""
+        prompt = _config.PROMPT_USER_TEMPLATE.format(task=task)
+
+        if cot_enabled and _config.PROMPT_COT_ENABLED:
+            prompt += "\n请按格式输出：观察 → 分析 → 动作，三行。"
+
+        if context:
+            history = "\n".join(
+                f"  步骤{i+1}: {act}" for i, act in enumerate(context)
+            )
+            prompt += f"\n已完成步骤：\n{history}"
+
+        if extra_text:
+            prompt += f"\n{extra_text}"
+
+        if ocr_results:
+            prompt += self._build_ocr_text(ocr_results, include_coords=True, task=task)
+
+        return prompt
+
+    # ===== 公开查询接口 =====
+
     def query(
         self,
         image: Image.Image,
         task: str,
         context: Optional[list] = None,
+        ocr_results: Optional[list] = None,
     ) -> str:
         """向模型发送截图和任务，返回模型响应。
+
+        双层架构（TWO_STAGE_ENABLED=True）：
+          判断层(7B)分析屏幕→制定策略 → 执行层(2B)根据策略+OCR坐标输出精确动作。
+        单层架构（TWO_STAGE_ENABLED=False）：
+          直接由执行层模型一步完成理解和动作输出。
 
         Args:
             image: 当前屏幕截图 (PIL.Image)。
             task: 用户自然语言任务描述。
             context: 前几步的历史动作记录（可选）。
+            ocr_results: OCR 识别结果列表（可选），用于提供精确坐标。
 
         Returns:
-            模型的原始文本输出。
+            模型的原始文本输出（含精确动作）。
 
         Raises:
             ModelError: 推理失败或超时。
@@ -122,38 +266,165 @@ class ModelClient:
         if image is None:
             raise ModelError("输入截图不能为 None")
 
-        # 压缩大图，防止显存溢出
         image = self._resize_image(image)
 
-        user_prompt = _config.PROMPT_USER_TEMPLATE.format(task=task)
+        # 尝试双层架构
+        if _config.TWO_STAGE_ENABLED:
+            try:
+                return self._query_two_stage(image, task, context, ocr_results)
+            except Exception as e:
+                logger.warning(
+                    f"双层推理失败，降级为单层模式: {e}"
+                )
+                # 降级为单层，继续执行
 
-        # CoT 推理引导（可通过配置关闭）
-        if _config.PROMPT_COT_ENABLED:
-            user_prompt += "\n请先简述屏幕上看到的关键元素（1句话），然后输出下一步动作。"
+        # 单层模式（默认/降级）
+        return self._query_single(image, task, context, ocr_results)
 
+    def _query_two_stage(
+        self, image: Image.Image, task: str,
+        context: list, ocr_results: list,
+    ) -> str:
+        """双层推理：判断层分析 + 执行层精确动作。"""
+        # === Stage 1: 判断层（脑子）—— 只看文字OCR，不懂坐标 ===
+        judge_prompt = _config.PROMPT_JUDGE_USER.format(task=task)
         if context:
-            history_lines = "\n".join(f"  步骤{i+1}: {act}" for i, act in enumerate(context))
-            user_prompt += f"\n已完成步骤：\n{history_lines}"
+            history = "\n".join(
+                f"  步骤{i+1}: {act}" for i, act in enumerate(context)
+            )
+            judge_prompt += f"\n已完成步骤：\n{history}"
+        # 判断层只给文字列表（不含坐标），聚焦语义理解
+        if ocr_results:
+            judge_prompt += self._build_ocr_text(ocr_results, include_coords=False, task=task)
+
+        logger.info("【判断层】开始分析…")
+        judge_output = self._query_judge(image, judge_prompt)
+        logger.info(f"【判断层】输出: {judge_output[:120]}")
+
+        # 判断层输出过长时截断（防止垃圾文本污染执行层）
+        if len(judge_output) > 300:
+            logger.warning(f"判断层输出过长({len(judge_output)}字符)，截断至300字符")
+            judge_output = judge_output[:300]
+
+        # === Stage 2: 执行层（手）—— 大脑分析 + OCR坐标 → 精确动作 ===
+        executor_prompt = _config.PROMPT_USER_TEMPLATE.format(task=task)
+        # 注入判断层分析
+        executor_prompt += (
+            f"\n\n【大脑分析】\n{judge_output}"
+            f"\n\n请根据以上分析，结合OCR坐标，输出下一步精确动作（只输出动作本身即可）。"
+        )
+        if context:
+            history = "\n".join(
+                f"  步骤{i+1}: {act}" for i, act in enumerate(context)
+            )
+            executor_prompt += f"\n已完成步骤：\n{history}"
+        if ocr_results:
+            executor_prompt += self._build_ocr_text(ocr_results, include_coords=True, task=task)
+            executor_prompt += "\n请使用OCR提供的坐标来精确点击目标，不要自己猜测坐标。"
+
+        logger.info("【执行层】根据大脑分析生成精确动作…")
+        return self._query_executor(image, executor_prompt)
+
+    def _query_single(
+        self, image: Image.Image, task: str,
+        context: list, ocr_results: list,
+    ) -> str:
+        """单层推理（原逻辑，兼容 TWO_STAGE_ENABLED=False）。"""
+        user_prompt = self._build_user_prompt(task, context, ocr_results)
 
         if self.mode == "local":
-            return self._query_local(image, user_prompt)
+            return self._query_local(image, user_prompt, self.model_name)
         else:
-            return self._query_api(image, user_prompt)
+            return self._query_api(image, user_prompt, self.model_name,
+                                   self.api_url, self.api_key, MODEL_MAX_TOKENS)
+
+    # ===== 判断层推理 =====
+
+    def _query_judge(self, image: Image.Image, user_prompt: str) -> str:
+        """调用判断层模型（7B），返回自由文本策略分析。"""
+        if self.judge_mode == "local":
+            return self._query_local(
+                image=image,
+                user_prompt=user_prompt,
+                model_name=self.judge_model_name,
+                max_tokens=_JUDGE_MAX_TOKENS,
+                system_prompt=_config.PROMPT_JUDGE_SYSTEM,
+            )
+        else:
+            return self._query_api(
+                image=image,
+                user_prompt=user_prompt,
+                model_name=self.judge_model_name,
+                api_url=self.judge_api_url,
+                api_key=self.judge_api_key,
+                max_tokens=_JUDGE_MAX_TOKENS,
+                system_prompt=_config.PROMPT_JUDGE_SYSTEM,
+            )
+
+    # ===== 执行层推理 =====
+
+    def _query_executor(self, image: Image.Image, user_prompt: str) -> str:
+        """调用执行层模型（2B），根据 judge 分析 + OCR 坐标输出精确动作。"""
+        if self.mode == "local":
+            return self._query_local(
+                image=image, user_prompt=user_prompt,
+                model_name=self.model_name,
+                max_tokens=_EXECUTOR_MAX_TOKENS,
+            )
+        else:
+            return self._query_api(
+                image=image, user_prompt=user_prompt,
+                model_name=self.model_name,
+                api_url=self.api_url, api_key=self.api_key,
+                max_tokens=_EXECUTOR_MAX_TOKENS,
+            )
 
     # ===== 本地推理 =====
 
-    def _query_local(self, image: Image.Image, user_prompt: str) -> str:
-        """本地 Transformers 推理。"""
-        if self._model is None:
-            self._model, self._processor = _load_local_model(self.model_name)
+    def _query_local(
+        self, image: Image.Image, user_prompt: str,
+        model_name: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        """本地 Transformers 推理。
+
+        Args:
+            image: 截图。
+            user_prompt: 用户提示词文本。
+            model_name: 模型名，None 则用 self.model_name。
+            max_tokens: 最大输出 token 数，None 则用 MODEL_MAX_TOKENS。
+            system_prompt: 自定义系统提示词，None 则用 _build_system_prompt()。
+        """
+        model_name = model_name or self.model_name
+        max_tokens = max_tokens or MODEL_MAX_TOKENS
+        is_judge = system_prompt is not None
+
+        # 判断层和执行层可能用不同模型
+        # 如果模型名相同，复用同一个实例（节省显存）
+        if is_judge:
+            if model_name == self.model_name and self._model is not None:
+                # 同模型复用（执行层先加载的场景）
+                model, processor = self._model, self._processor
+            elif self._judge_model is not None:
+                model, processor = self._judge_model, self._judge_processor
+            else:
+                self._judge_model, self._judge_processor = _load_local_model(model_name)
+                model, processor = self._judge_model, self._judge_processor
+                # 模型名相同 → 执行层也指向同一实例，避免重复加载
+                if model_name == self.model_name:
+                    self._model, self._processor = self._judge_model, self._judge_processor
+        elif self._model is not None:
+            model, processor = self._model, self._processor
+        else:
+            self._model, self._processor = _load_local_model(model_name)
+            model, processor = self._model, self._processor
+            # 模型名相同 → 判断层也指向同一实例
+            if model_name == self.judge_model_name:
+                self._judge_model, self._judge_processor = self._model, self._processor
 
         try:
-            # 构建 Qwen2-VL 的标准输入格式
-            # 拼接系统提示词 + few-shot 示例
-            system_content = _config.PROMPT_SYSTEM
-            if _config.PROMPT_FEW_SHOT_EXAMPLES:
-                system_content += "\n\n" + "\n\n".join(_config.PROMPT_FEW_SHOT_EXAMPLES)
-
+            system_content = system_prompt or self._build_system_prompt()
             messages = [
                 {"role": "system", "content": system_content},
                 {
@@ -166,7 +437,7 @@ class ModelClient:
             ]
 
             # 使用 processor 处理消息
-            text = self._processor.apply_chat_template(
+            text = processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
             if process_vision_info is None:
@@ -176,18 +447,18 @@ class ModelClient:
                 )
             image_inputs, video_inputs = process_vision_info(messages)
 
-            inputs = self._processor(
+            inputs = processor(
                 text=[text],
                 images=image_inputs,
                 videos=video_inputs,
                 padding=True,
                 return_tensors="pt",
-            ).to(self._model.device)
+            ).to(model.device)
 
             start_time = time.time()
-            generated_ids = self._model.generate(
+            generated_ids = model.generate(
                 **inputs,
-                max_new_tokens=MODEL_MAX_TOKENS,
+                max_new_tokens=max_tokens,
             )
             elapsed = time.time() - start_time
 
@@ -196,13 +467,16 @@ class ModelClient:
                 out_ids[len(in_ids):]
                 for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
             ]
-            output_text = self._processor.batch_decode(
+            output_text = processor.batch_decode(
                 generated_ids_trimmed,
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
             )[0]
 
-            logger.info(f"本地推理完成，耗时 {elapsed:.2f}s，输出: {output_text[:80]}")
+            label = "判断层" if is_judge else "本地"
+            logger.info(
+                f"{label}推理完成，耗时 {elapsed:.2f}s，输出: {output_text[:80]}"
+            )
             return output_text.strip()
 
         except Exception as e:
@@ -211,15 +485,35 @@ class ModelClient:
 
     # ===== API 推理 =====
 
-    def _query_api(self, image: Image.Image, user_prompt: str) -> str:
-        """通过 HTTP API 调用远程模型。"""
-        if not self.api_url:
-            raise ModelError("API 模式需要配置 MODEL_API_URL")
+    def _query_api(
+        self, image: Image.Image, user_prompt: str,
+        model_name: Optional[str] = None,
+        api_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        """通过 HTTP API 调用远程模型。
 
-        # 拼接系统提示词 + few-shot 示例
-        system_content = _config.PROMPT_SYSTEM
-        if _config.PROMPT_FEW_SHOT_EXAMPLES:
-            system_content += "\n\n" + "\n\n".join(_config.PROMPT_FEW_SHOT_EXAMPLES)
+        Args:
+            image: 截图。
+            user_prompt: 用户提示词文本。
+            model_name: API 模型名，None 则用 self.model_name。
+            api_url: API 端点，None 则用 self.api_url。
+            api_key: API 密钥，None 则用 self.api_key。
+            max_tokens: 最大输出 token 数，None 则用 MODEL_MAX_TOKENS。
+            system_prompt: 自定义系统提示词，None 则用 _build_system_prompt()。
+        """
+        api_url = api_url or self.api_url
+        api_key = api_key or self.api_key
+        model_name = model_name or self.model_name
+        max_tokens = max_tokens or MODEL_MAX_TOKENS
+
+        if not api_url:
+            raise ModelError("API 模式需要配置 API URL")
+
+        # 系统提示词
+        system_content = system_prompt or self._build_system_prompt()
 
         # PIL Image → base64
         buf = io.BytesIO()
@@ -227,11 +521,11 @@ class ModelClient:
         img_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
         headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
 
         payload = {
-            "model": self.model_name,
+            "model": model_name,
             "messages": [
                 {"role": "system", "content": system_content},
                 {
@@ -245,7 +539,7 @@ class ModelClient:
                     ],
                 },
             ],
-            "max_tokens": MODEL_MAX_TOKENS,
+            "max_tokens": max_tokens,
         }
 
         # 重试逻辑：最多 2 次
@@ -254,7 +548,7 @@ class ModelClient:
             try:
                 start_time = time.time()
                 resp = requests.post(
-                    self.api_url.rstrip("/") + "/chat/completions",
+                    api_url.rstrip("/") + "/chat/completions",
                     json=payload,
                     headers=headers,
                     timeout=60,
@@ -291,10 +585,30 @@ def _load_local_model(model_name: str):
     try:
         # 使用 torch.float16 减少显存占用
         import torch
+
+        # 动态计算 GPU 显存上限，防止 VRAM 耗尽导致系统崩溃
+        # 笔记本 8GB 显卡：预留 2GB 给 KV Cache + 系统，上限 6GB
+        max_memory = None
+        if torch.cuda.is_available():
+            gpu_id = 0
+            total_vram = torch.cuda.get_device_properties(gpu_id).total_memory
+            total_gb = total_vram / (1024 ** 3)
+            # 使用配置中的比例（默认 0.75），或直接使用配置的绝对值
+            if _config.MODEL_GPU_MEMORY_GB:
+                limit_gb = _config.MODEL_GPU_MEMORY_GB
+            else:
+                limit_gb = int(total_gb * _config.MODEL_GPU_MEMORY_RATIO)
+            max_memory = {gpu_id: f"{limit_gb}GB"}
+            logger.info(
+                f"GPU 总显存 {total_gb:.1f}GB，"
+                f"模型加载上限设为 {limit_gb}GB"
+            )
+
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_name,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto",
+            max_memory=max_memory,
         )
         processor = AutoProcessor.from_pretrained(model_name)
         logger.info("本地模型加载成功")

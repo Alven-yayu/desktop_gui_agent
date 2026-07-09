@@ -386,15 +386,21 @@ class TestModelClientQuery:
     @patch('desktop_gui_agent.agent.model_client.requests.post')
     def test_query_api_retry_on_failure(self, mock_post, sample_screenshot):
         """API 调用失败时应重试一次"""
+        import desktop_gui_agent.config as config
         from desktop_gui_agent.agent.model_client import ModelClient
         from desktop_gui_agent.utils.exceptions import ModelError
         mock_post.side_effect = Exception("网络错误")
 
-        client = ModelClient(mode="api", api_url="http://test:8080/v1")
-        with pytest.raises(ModelError):
-            client.query(sample_screenshot, "测试任务")
-        # 应该调用了两次（原始 + 重试）
-        assert mock_post.call_count == 2
+        old_flag = config.TWO_STAGE_ENABLED
+        config.TWO_STAGE_ENABLED = False
+        try:
+            client = ModelClient(mode="api", api_url="http://test:8080/v1")
+            with pytest.raises(ModelError):
+                client.query(sample_screenshot, "测试任务")
+            # 应该调用了两次（原始 + 重试）
+            assert mock_post.call_count == 2
+        finally:
+            config.TWO_STAGE_ENABLED = old_flag
 
     def test_query_with_none_image(self, sample_screenshot):
         """None 截图应抛 ModelError"""
@@ -613,7 +619,12 @@ class TestTaskManagerRun:
         from desktop_gui_agent.agent.task_manager import TaskManager
 
         mock_model = MagicMock()
-        mock_model.query.return_value = 'click(x=50, y=50)'
+        # 每步返回不同坐标，避免触发死循环检测（连续3次相同动作）
+        mock_model.query.side_effect = [
+            'click(x=10, y=10)',
+            'click(x=20, y=20)',
+            'click(x=30, y=30)',
+        ]
         mock_mouse = MagicMock()
         mock_mouse.click.return_value = True
         mock_keyboard = MagicMock()
@@ -815,12 +826,17 @@ class TestTaskManagerRun:
         log_dir = str(PlatformInfo.get_log_dir())
         json_files = [f for f in os.listdir(log_dir) if f.startswith("task_")]
         assert len(json_files) > 0
-        latest = sorted(json_files)[-1]
-        with open(os.path.join(log_dir, latest), "r", encoding="utf-8") as f:
-            record = json.load(f)
-        assert record["task"] == "记录历史测试"
-        assert len(record["history"]) == 1
-        assert record["history"][0]["action_type"] == "finish"
+        # 按任务内容查找自己的文件，避免与其他测试竞争同一个目录
+        found = None
+        for fname in reversed(sorted(json_files)):
+            with open(os.path.join(log_dir, fname), "r", encoding="utf-8") as f:
+                rec = json.load(f)
+            if rec.get("task") == "记录历史测试":
+                found = rec
+                break
+        assert found is not None, "未找到任务'记录历史测试'的历史文件"
+        assert len(found["history"]) == 1
+        assert found["history"][0]["action_type"] == "finish"
 
     # ---- Phase 5: 错误恢复增强 ----
 
@@ -981,11 +997,13 @@ class TestMain:
             "error": None,
         }
 
-        # 模拟：无命令行参数 → 交互模式 → 用户输入任务
+        # 模拟：无命令行参数 → 交互模式 → 用户输入任务 → 然后退出
         test_args = ["main.py"]
         with patch.object(sys, "argv", test_args), \
+             patch.object(sys.stdin, "isatty", return_value=True), \
              patch("desktop_gui_agent.main.TaskManager", return_value=mock_tm), \
-             patch("builtins.input", return_value="用户输入的任务"):
+             patch("builtins.input", side_effect=["用户输入的任务", "exit"]), \
+             patch("desktop_gui_agent.main.time.sleep"):  # 跳过实际延时
             exit_code = main()
 
         assert exit_code == 0
@@ -1021,36 +1039,42 @@ class TestPromptBuilding:
         for msg in messages:
             if msg["role"] == "system":
                 system_content = msg["content"]
-        assert "示例1" in system_content
-        assert "打开记事本" in system_content
+        assert "示例A" in system_content
+        assert "打开计算器" in system_content
 
     @patch('desktop_gui_agent.agent.model_client.process_vision_info')
     @patch('desktop_gui_agent.agent.model_client._load_local_model')
     def test_cot_guidance_in_user_prompt(self, mock_load, mock_pvi):
-        """CoT 引导文本应出现在 user prompt 中"""
+        """CoT 引导文本应出现在 user prompt 中（单层模式）"""
+        import desktop_gui_agent.config as config
         from desktop_gui_agent.agent.model_client import ModelClient
         from PIL import Image
 
-        mock_model = MagicMock()
-        mock_model.device = "cpu"
-        mock_processor = MagicMock()
-        mock_processor.apply_chat_template.return_value = "chat template"
-        mock_processor.batch_decode.return_value = ["finish(result=\"ok\")"]
-        mock_load.return_value = (mock_model, mock_processor)
-        mock_pvi.return_value = ([], [])
+        old_flag = config.TWO_STAGE_ENABLED
+        config.TWO_STAGE_ENABLED = False
+        try:
+            mock_model = MagicMock()
+            mock_model.device = "cpu"
+            mock_processor = MagicMock()
+            mock_processor.apply_chat_template.return_value = "chat template"
+            mock_processor.batch_decode.return_value = ["finish(result=\"ok\")"]
+            mock_load.return_value = (mock_model, mock_processor)
+            mock_pvi.return_value = ([], [])
 
-        client = ModelClient(mode="local")
-        client.query(Image.new("RGB", (100, 100)), "测试")
+            client = ModelClient(mode="local")
+            client.query(Image.new("RGB", (100, 100)), "测试")
 
-        call_args = mock_processor.apply_chat_template.call_args
-        messages = call_args[0][0]
-        user_text = ""
-        for msg in messages:
-            if msg["role"] == "user":
-                for item in msg["content"]:
-                    if item["type"] == "text":
-                        user_text += item["text"]
-        assert "简述" in user_text
+            call_args = mock_processor.apply_chat_template.call_args
+            messages = call_args[0][0]
+            user_text = ""
+            for msg in messages:
+                if msg["role"] == "user":
+                    for item in msg["content"]:
+                        if item["type"] == "text":
+                            user_text += item["text"]
+            assert "请按格式输出" in user_text
+        finally:
+            config.TWO_STAGE_ENABLED = old_flag
 
     @patch('desktop_gui_agent.agent.model_client.process_vision_info')
     @patch('desktop_gui_agent.agent.model_client._load_local_model')
@@ -1111,3 +1135,202 @@ class TestPromptBuilding:
             assert isinstance(result, str)
         finally:
             config.PROMPT_FEW_SHOT_EXAMPLES = old_examples
+
+
+# ===== 双层 AI 架构测试（Phase 6）=====
+
+class TestTwoStage:
+    """ModelClient 双层推理（判断层 + 执行层）测试"""
+
+    # ---- 配置检查 ----
+
+    def test_two_stage_config_defaults(self):
+        """双层架构配置项应存在且默认开启（judge和执行层复用同模型，无额外开销）"""
+        import desktop_gui_agent.config as config
+        assert config.TWO_STAGE_ENABLED is True
+        assert isinstance(config.MODEL_NAME_JUDGE, str)
+        assert config.MODEL_MODE_JUDGE in ("local", "api")
+        assert isinstance(config.PROMPT_JUDGE_SYSTEM, str)
+        assert "【输出格式】" in config.PROMPT_JUDGE_SYSTEM
+        assert isinstance(config.PROMPT_JUDGE_USER, str)
+
+    def test_two_stage_disabled_calls_single(self):
+        """TWO_STAGE_ENABLED=False 时应走单层推理"""
+        import desktop_gui_agent.config as config
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+
+        old_flag = config.TWO_STAGE_ENABLED
+        config.TWO_STAGE_ENABLED = False
+        try:
+            with patch('desktop_gui_agent.agent.model_client.process_vision_info') as mock_pvi, \
+                 patch('desktop_gui_agent.agent.model_client._load_local_model') as mock_load:
+                mock_pvi.return_value = ([], [])
+                mock_model = MagicMock()
+                mock_model.device = "cpu"
+                mock_processor = MagicMock()
+                mock_processor.apply_chat_template.return_value = "chat"
+                mock_processor.batch_decode.return_value = ["click(x=10, y=20)"]
+                mock_load.return_value = (mock_model, mock_processor)
+
+                from desktop_gui_agent.agent.model_client import ModelClient
+                client = ModelClient(mode="local")
+                result = client.query(Image.new("RGB", (100, 100)), "测试")
+                assert result == "click(x=10, y=20)"  # 单层直接输出动作
+        finally:
+            config.TWO_STAGE_ENABLED = old_flag
+
+    # ---- 判断层 prompt 构建 ----
+
+    def test_judge_system_prompt_format(self):
+        """判断层系统提示词应包含输出格式要求和核心原则"""
+        import desktop_gui_agent.config as config
+        assert "状态：" in config.PROMPT_JUDGE_SYSTEM
+        assert "目标：" in config.PROMPT_JUDGE_SYSTEM
+        assert "策略：" in config.PROMPT_JUDGE_SYSTEM
+        assert "找不到就别瞎点" in config.PROMPT_JUDGE_SYSTEM
+        assert "Win键搜索" in config.PROMPT_JUDGE_SYSTEM
+
+    def test_judge_user_prompt_has_task_placeholder(self):
+        """判断层用户提示词模板应包含 {task} 占位符"""
+        import desktop_gui_agent.config as config
+        assert "{task}" in config.PROMPT_JUDGE_USER
+
+    # ---- 双层流程 mock ----
+
+    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
+    @patch('desktop_gui_agent.agent.model_client._load_local_model')
+    def test_two_stage_flow_calls_judge_then_executor(self, mock_load, mock_pvi):
+        """双层模式下应先调判断层再调执行层"""
+        import desktop_gui_agent.config as config
+        from unittest.mock import MagicMock
+        from PIL import Image
+
+        old_flag = config.TWO_STAGE_ENABLED
+        config.TWO_STAGE_ENABLED = True
+        try:
+            mock_pvi.return_value = ([], [])
+            mock_model = MagicMock()
+            mock_model.device = "cpu"
+            mock_processor = MagicMock()
+            mock_processor.apply_chat_template.return_value = "chat"
+            # 两次 batch_decode: 第一次是 judge, 第二次是 executor
+            mock_processor.batch_decode.side_effect = [
+                ["状态：桌面可见\n目标：打开计算器\n策略：按Win键"],
+                ["hotkey(win)"],
+            ]
+            mock_load.return_value = (mock_model, mock_processor)
+
+            from desktop_gui_agent.agent.model_client import ModelClient
+            client = ModelClient(
+                mode="local",
+                judge_mode="local",  # 用本地 mock 测试双层流程
+            )
+            result = client.query(Image.new("RGB", (100, 100)), "打开计算器")
+            # executor 输出作为最终结果
+            assert result == "hotkey(win)"
+            # batch_decode 被调用了 2 次（judge + executor）
+            assert mock_processor.batch_decode.call_count == 2
+        finally:
+            config.TWO_STAGE_ENABLED = old_flag
+
+    # ---- 降级逻辑 ----
+
+    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
+    @patch('desktop_gui_agent.agent.model_client._load_local_model')
+    def test_two_stage_degradation_on_judge_failure(self, mock_load, mock_pvi):
+        """判断层失败时应自动降级为单层模式"""
+        import desktop_gui_agent.config as config
+        from unittest.mock import MagicMock
+        from PIL import Image
+
+        old_flag = config.TWO_STAGE_ENABLED
+        config.TWO_STAGE_ENABLED = True
+        try:
+            mock_pvi.return_value = ([], [])
+            mock_model = MagicMock()
+            mock_model.device = "cpu"
+            mock_processor = MagicMock()
+            mock_processor.apply_chat_template.return_value = "chat"
+            # 第一次 batch_decode（judge）抛异常 → 降级
+            # 第二次 batch_decode（单层 executor）返回结果
+            mock_processor.batch_decode.side_effect = [
+                Exception("Judge model OOM"),
+                ["click(x=100, y=200)"],
+            ]
+            mock_load.return_value = (mock_model, mock_processor)
+
+            from desktop_gui_agent.agent.model_client import ModelClient
+            client = ModelClient(
+                mode="local",
+                judge_mode="local",
+            )
+            result = client.query(Image.new("RGB", (100, 100)), "测试")
+            # 降级后应返回单层推理的结果
+            assert result == "click(x=100, y=200)"
+        finally:
+            config.TWO_STAGE_ENABLED = old_flag
+
+    # ---- 执行层 prompt 验证 ----
+
+    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
+    @patch('desktop_gui_agent.agent.model_client._load_local_model')
+    def test_executor_receives_judge_analysis(self, mock_load, mock_pvi):
+        """执行层 prompt 应包含判断层的分析结果"""
+        import desktop_gui_agent.config as config
+        from unittest.mock import MagicMock
+        from PIL import Image
+
+        old_flag = config.TWO_STAGE_ENABLED
+        config.TWO_STAGE_ENABLED = True
+        try:
+            mock_pvi.return_value = ([], [])
+
+            # 两个独立的 processor mock（judge 和 executor 共享同一个 mock）
+            mock_processor = MagicMock()
+            mock_processor.apply_chat_template.return_value = "chat"
+            judge_output = "状态：桌面可见\n目标：打开计算器\n策略：按Win键"
+            mock_processor.batch_decode.side_effect = [
+                [judge_output],
+                ["hotkey(win)"],
+            ]
+
+            mock_model = MagicMock()
+            mock_model.device = "cpu"
+            mock_load.return_value = (mock_model, mock_processor)
+
+            from desktop_gui_agent.agent.model_client import ModelClient
+            client = ModelClient(mode="local", judge_mode="local")
+            client.query(Image.new("RGB", (100, 100)), "打开计算器")
+
+            # 第二次 apply_chat_template 调用是 executor 的
+            # 其 user prompt 应包含判断层的分析
+            calls = mock_processor.apply_chat_template.call_args_list
+            assert len(calls) >= 2
+            # executor call (second)
+            executor_messages = calls[1][0][0]
+            user_text = ""
+            for msg in executor_messages:
+                if msg["role"] == "user":
+                    for item in msg["content"]:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            user_text += item["text"]
+            assert "状态：桌面可见" in user_text
+            assert "打开计算器" in user_text
+        finally:
+            config.TWO_STAGE_ENABLED = old_flag
+
+    # ---- init 参数 ----
+
+    def test_init_accepts_judge_params(self):
+        """ModelClient 初始化应接受 judge 相关参数"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        client = ModelClient(
+            mode="api",
+            judge_mode="api",
+            judge_model_name="Qwen/Qwen2-VL-7B-Instruct",
+            judge_api_url="http://localhost:11434/v1",
+        )
+        assert client.judge_mode == "api"
+        assert client.judge_model_name == "Qwen/Qwen2-VL-7B-Instruct"
+        assert client.judge_api_url == "http://localhost:11434/v1"

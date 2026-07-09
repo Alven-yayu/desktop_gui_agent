@@ -61,21 +61,28 @@ def parse(model_output: Optional[str]) -> Dict[str, Any]:
 
     text = model_output.strip()
 
-    # 只取第一行（单步单动作原则）
-    first_line = text.split("\n")[0].strip()
+    # 搜索范围：优先匹配含"动作："的行，否则搜全部行
+    lines = text.split("\n")
+    candidates = [l.strip() for l in lines]
 
-    # 按优先级尝试各动作
-    for pattern, action_type, params_builder in _PARSERS:
-        match = pattern.search(first_line)
-        if match:
-            params = params_builder(match)
-            if params is not None:
-                logger.info(f"解析成功: {action_type} {params}")
-                return {"action_type": action_type, "params": params}
+    # 如果有"动作："开头或"动作："所在的行，优先匹配
+    action_lines = [l for l in candidates if "动作：" in l]
+    search_lines = action_lines + candidates  # 优先搜动作行
+
+    for line in search_lines:
+        # 去掉可能的"动作："前缀
+        clean = line.replace("动作：", "").replace("动作:", "").strip()
+        for pattern, action_type, params_builder in _PARSERS:
+            match = pattern.search(clean)
+            if match:
+                params = params_builder(match)
+                if params is not None:
+                    logger.info(f"解析成功: {action_type} {params}")
+                    return {"action_type": action_type, "params": params}
 
     # 所有模式都不匹配
-    logger.warning(f"无法解析模型输出: {first_line[:100]}")
-    return {"action_type": "unknown", "raw": first_line}
+    logger.warning(f"无法解析模型输出: {text[:100]}")
+    return {"action_type": "unknown", "raw": text}
 
 
 def _build_click_params(match: re.Match) -> Dict[str, int]:

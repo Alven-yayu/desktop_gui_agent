@@ -6,6 +6,7 @@
 import json
 import os
 import random
+import threading
 import time
 from datetime import datetime
 from typing import Optional
@@ -140,7 +141,7 @@ class TaskManager:
                     time.sleep(0.5)
         raise last_error  # type: ignore[misc]
 
-    def run(self, task: str) -> dict:
+    def run(self, task: str, cancel_event: Optional[threading.Event] = None) -> dict:
         """执行 Agent 主循环。
 
         每步依次：截图 → OCR → 模型推理 → 动作解析 → 坐标校验 → 执行。
@@ -148,6 +149,7 @@ class TaskManager:
 
         Args:
             task: 用户自然语言任务描述。
+            cancel_event: 外部传入的取消事件，set() 后循环立即终止。
 
         Returns:
             {"success": bool, "result": str, "steps": int, "error": str}
@@ -180,6 +182,17 @@ class TaskManager:
                     }
 
                 step += 1
+
+                # 检查用户是否请求终止
+                if cancel_event and cancel_event.is_set():
+                    logger.info("用户请求终止任务")
+                    return {
+                        "success": False,
+                        "result": result_text,
+                        "steps": step - 1,
+                        "error": "用户终止",
+                    }
+
                 step_start = time.time()
                 timings = {}
 
@@ -208,7 +221,9 @@ class TaskManager:
                 model_start = time.time()
                 history_actions = [h["action_raw"] for h in history if "action_raw" in h]
                 try:
-                    model_output = self.model_client.query(image, task, context=history_actions)
+                    model_output = self.model_client.query(
+                        image, task, context=history_actions, ocr_results=ocr_results,
+                    )
                 except Exception as e:
                     category = classify_error(e)
                     if category == ErrorCategory.FATAL:
@@ -235,6 +250,22 @@ class TaskManager:
                     logger.warning(f"无法解析模型输出: {model_output[:100]}")
                     consecutive_errors += 1
                     continue
+
+                # 死循环检测：连续3次输出相同动作 → 强制终止
+                if len(history) >= 2:
+                    last_two = [
+                        (h.get("action_type"), h.get("action_params", {}))
+                        for h in history[-2:]
+                    ]
+                    current = (action["action_type"], action.get("params", {}))
+                    if last_two[0] == last_two[1] == current:
+                        logger.warning("检测到连续3次相同动作，模型可能陷入死循环，强制终止")
+                        return {
+                            "success": False,
+                            "result": result_text,
+                            "steps": step,
+                            "error": "模型陷入死循环（连续3次相同动作）",
+                        }
 
                 # 5. 坐标校验（仅 click 动作）
                 if action["action_type"] == "click":
