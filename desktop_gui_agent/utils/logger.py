@@ -17,7 +17,8 @@ def _fix_stdout_encoding():
     if _stdout_fixed:
         return
     _stdout_fixed = True
-    if sys.platform != "win32":
+    from desktop_gui_agent.utils.platform import PlatformInfo
+    if not PlatformInfo.is_windows:
         return
     # 跳过 pytest 等工具已替换过 stdout 的场景
     if not hasattr(sys.stdout, "buffer"):
@@ -65,8 +66,8 @@ def get_logger(name: str) -> logging.Logger:
     logger.addHandler(console)
 
     # 文件（自动创建 logs/ 目录）
-    log_dir = os.path.join(os.path.dirname(__file__), "..", "..", "logs")
-    os.makedirs(log_dir, exist_ok=True)
+    from desktop_gui_agent.utils.platform import PlatformInfo
+    log_dir = PlatformInfo.get_log_dir()
     today = datetime.now().strftime("%Y-%m-%d")
     file_handler = logging.FileHandler(
         os.path.join(log_dir, f"{today}.log"), encoding="utf-8"

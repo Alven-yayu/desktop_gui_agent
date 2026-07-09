@@ -19,8 +19,9 @@ from desktop_gui_agent.control.keyboard_controller import KeyboardController
 from desktop_gui_agent.control.mouse_controller import MouseController
 from desktop_gui_agent.perception.ocr_recognizer import recognize
 from desktop_gui_agent.perception.screenshot import capture
-from desktop_gui_agent.utils.exceptions import OCRError, ScreenshotError
+from desktop_gui_agent.utils.exceptions import ErrorCategory, OCRError, ScreenshotError, classify_error
 from desktop_gui_agent.utils.logger import get_logger
+from desktop_gui_agent.utils.platform import PlatformInfo
 
 logger = get_logger(__name__)
 
@@ -111,6 +112,34 @@ class TaskManager:
             logger.warning(f"未知动作类型: {action_type}")
             return False
 
+    def _capture_with_retry(self, max_retries: int = 2) -> Image.Image:
+        """截图，失败时最多重试 max_retries 次。
+
+        每次重试间隔 0.5s。全部失败后抛出 ScreenshotError，
+        由上层 run() 中的错误分类机制处理。
+
+        Args:
+            max_retries: 最大重试次数（默认 2）。
+
+        Returns:
+            截图的 PIL Image 对象。
+
+        Raises:
+            ScreenshotError: 全部重试仍失败。
+        """
+        last_error = None
+        for attempt in range(max_retries + 1):  # 原始 + 重试
+            try:
+                return capture()
+            except ScreenshotError as e:
+                last_error = e
+                if attempt < max_retries:
+                    logger.warning(
+                        f"截图失败（第 {attempt + 1} 次），{0.5}s 后重试..."
+                    )
+                    time.sleep(0.5)
+        raise last_error  # type: ignore[misc]
+
     def run(self, task: str) -> dict:
         """执行 Agent 主循环。
 
@@ -154,12 +183,12 @@ class TaskManager:
                 step_start = time.time()
                 timings = {}
 
-                # 1. 截图
+                # 1. 截图（带重试）
                 try:
-                    image = capture()
+                    image = self._capture_with_retry(max_retries=2)
                     timings["screenshot"] = time.time() - step_start
                 except ScreenshotError as e:
-                    logger.error(f"截图失败: {e}")
+                    logger.error(f"截图失败（已重试）: {e}")
                     consecutive_errors += 1
                     continue
 
@@ -181,7 +210,16 @@ class TaskManager:
                 try:
                     model_output = self.model_client.query(image, task, context=history_actions)
                 except Exception as e:
-                    logger.error(f"模型推理失败: {e}")
+                    category = classify_error(e)
+                    if category == ErrorCategory.FATAL:
+                        logger.error(f"致命错误，立即终止: {e}")
+                        return {
+                            "success": False,
+                            "result": result_text,
+                            "steps": step,
+                            "error": f"致命错误: {e}",
+                        }
+                    logger.error(f"模型推理失败 ({category.value}): {e}")
                     consecutive_errors += 1
                     continue
                 timings["model"] = time.time() - model_start
@@ -277,7 +315,7 @@ class TaskManager:
         Returns:
             截图保存路径。
         """
-        log_dir = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "screenshots")
+        log_dir = PlatformInfo.get_log_dir() / "screenshots"
         os.makedirs(log_dir, exist_ok=True)
         path = os.path.join(log_dir, f"step_{step}.png")
         image.save(path, "PNG")
@@ -290,7 +328,7 @@ class TaskManager:
             history: 步骤历史记录列表。
             task: 原始任务描述。
         """
-        log_dir = os.path.join(os.path.dirname(__file__), "..", "..", "logs")
+        log_dir = PlatformInfo.get_log_dir()
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%H%M%S")
         path = os.path.join(log_dir, f"task_{timestamp}.json")

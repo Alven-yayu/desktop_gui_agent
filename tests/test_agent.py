@@ -811,9 +811,8 @@ class TestTaskManagerRun:
             result = tm.run("记录历史测试")
 
         assert result["success"] is True
-        log_dir = os.path.join(
-            os.path.dirname(__file__), "..", "desktop_gui_agent", "..", "logs"
-        )
+        from desktop_gui_agent.utils.platform import PlatformInfo
+        log_dir = str(PlatformInfo.get_log_dir())
         json_files = [f for f in os.listdir(log_dir) if f.startswith("task_")]
         assert len(json_files) > 0
         latest = sorted(json_files)[-1]
@@ -822,6 +821,80 @@ class TestTaskManagerRun:
         assert record["task"] == "记录历史测试"
         assert len(record["history"]) == 1
         assert record["history"][0]["action_type"] == "finish"
+
+    # ---- Phase 5: 错误恢复增强 ----
+
+    def test_capture_with_retry_success_first_try(self):
+        """截图首次成功应返回图片"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        tm = TaskManager()
+        test_image = Image.new("RGB", (100, 100))
+        with patch("desktop_gui_agent.agent.task_manager.capture", return_value=test_image):
+            result = tm._capture_with_retry(max_retries=2)
+        assert result is test_image
+
+    def test_capture_with_retry_success_after_failure(self):
+        """截图第 2 次重试成功"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        from desktop_gui_agent.utils.exceptions import ScreenshotError
+
+        tm = TaskManager()
+        test_image = Image.new("RGB", (100, 100))
+        with patch("desktop_gui_agent.agent.task_manager.capture") as mock_cap, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"):
+            mock_cap.side_effect = [ScreenshotError("失败1"), test_image]
+            result = tm._capture_with_retry(max_retries=2)
+        assert result is test_image
+        assert mock_cap.call_count == 2
+
+    def test_capture_with_retry_all_failed(self):
+        """截图全部重试失败应抛出 ScreenshotError"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        from desktop_gui_agent.utils.exceptions import ScreenshotError
+
+        tm = TaskManager()
+        with patch("desktop_gui_agent.agent.task_manager.capture") as mock_cap, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"):
+            mock_cap.side_effect = ScreenshotError("连续失败")
+            with pytest.raises(ScreenshotError):
+                tm._capture_with_retry(max_retries=2)
+        assert mock_cap.call_count == 3  # 1 次原始 + 2 次重试
+
+    def test_run_fatal_error_returns_immediately(self):
+        """FATAL 错误应立即终止，不等 max_steps"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        from desktop_gui_agent.utils.exceptions import ModelError
+
+        mock_model = MagicMock()
+        mock_model.query.side_effect = ModelError("本地模型加载失败")
+        mock_mouse = MagicMock()
+        mock_keyboard = MagicMock()
+
+        with patch("desktop_gui_agent.agent.task_manager.capture") as mock_capture, \
+             patch("desktop_gui_agent.agent.task_manager.recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+                max_consecutive_errors=10,
+            )
+            result = tm.run("测试")
+
+        assert result["success"] is False
+        assert "致命错误" in result["error"]
+        assert result["steps"] == 1  # 第一步就终止
 
 
 # ===== Main 入口测试 =====
