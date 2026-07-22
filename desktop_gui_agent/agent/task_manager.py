@@ -48,6 +48,7 @@ class TaskManager:
         model_client: Optional[object] = None,
         max_steps: int = AGENT_MAX_STEPS,
         max_consecutive_errors: int = AGENT_MAX_CONSECUTIVE_ERRORS,
+        api_preset: Optional[str] = None,
     ):
         """初始化任务管理器。
 
@@ -57,12 +58,15 @@ class TaskManager:
             model_client: 模型客户端，None 则使用默认 ModelClient。
             max_steps: 最大步数上限。
             max_consecutive_errors: 连续错误次数阈值。
+            api_preset: API 预设名称（"dashscope" / "ollama"），None 则用本地模型。
         """
         self.max_steps = max_steps
         self.max_consecutive_errors = max_consecutive_errors
+        self.api_preset = api_preset
         self.mouse = mouse
         self.keyboard = keyboard
         self.model_client = model_client
+        self._marker_map: dict = {}  # 标注编号 → 坐标映射
         logger.info(
             f"TaskManager 初始化，max_steps={max_steps}，"
             f"max_consecutive_errors={max_consecutive_errors}"
@@ -99,8 +103,26 @@ class TaskManager:
         action_type = action.get("action_type", "unknown")
         params = action.get("params", {})
 
-        if action_type == "click":
+        if action_type == "click_marker":
+            marker = params["marker"]
+            info = self._marker_map.get(marker, {})
+            x, y = info.get("icon", (None, None))
+            if x is None:
+                logger.warning(f"标注 #{marker} 不存在，可用: {list(self._marker_map.keys())}")
+                return False
+            return self.mouse.click(x, y)
+        elif action_type == "double_click_marker":
+            marker = params["marker"]
+            info = self._marker_map.get(marker, {})
+            x, y = info.get("icon", (None, None))
+            if x is None:
+                logger.warning(f"标注 #{marker} 不存在，可用: {list(self._marker_map.keys())}")
+                return False
+            return self.mouse.double_click(x, y)
+        elif action_type == "click":
             return self.mouse.click(params["x"], params["y"])
+        elif action_type == "double_click":
+            return self.mouse.double_click(params["x"], params["y"])
         elif action_type == "type":
             return self.keyboard.type(params["text"])
         elif action_type == "scroll":
@@ -160,12 +182,17 @@ class TaskManager:
         if self.keyboard is None:
             self.keyboard = KeyboardController()
         if self.model_client is None:
-            self.model_client = ModelClient()
+            self.model_client = ModelClient(api_preset=self.api_preset)
 
         step = 0
         consecutive_errors = 0
         history = []
         result_text = ""
+
+        # 终端窗口避让：先尝试最小化，失败则自动裁剪
+        # （每次 run() 调用时执行一次，防止 OCR 自干扰）
+        from desktop_gui_agent.perception.screenshot import _init_terminal_avoidance
+        _init_terminal_avoidance()
 
         logger.info(f"开始执行任务: {task}")
 
@@ -217,12 +244,32 @@ class TaskManager:
                     ocr_results = []
                 timings["ocr"] = time.time() - ocr_start
 
-                # 3. 模型推理
+                # 3. 截图标注 + 模型推理
+                # 在截图上画出 OCR 检测到的每个元素位置（编号圆点），
+                # 模型看到标注图后可以直接视觉确认坐标，不再自己猜数字
+                from desktop_gui_agent.perception.screenshot import annotate_screenshot
+
+                annotated_image, marker_map = annotate_screenshot(
+                    image, ocr_results, max_items=15, task=task,
+                )
+                self._marker_map = marker_map  # 保存供 _dispatch 翻译编号
+                # 构建标注文字说明
+                marker_text_lines = [
+                    f"  #{num}: \"{info['text']}\" 图标({info['icon'][0]},{info['icon'][1]})"
+                    for num, info in marker_map.items()
+                ]
+                marker_extra = (
+                    "【屏幕标注说明】截图上橙色圆点旁的编号对应下方列表，"
+                    "请观察标注点在图中的实际位置来确认目标：\n"
+                    + "\n".join(marker_text_lines)
+                ) if marker_text_lines else ""
+
                 model_start = time.time()
                 history_actions = [h["action_raw"] for h in history if "action_raw" in h]
                 try:
                     model_output = self.model_client.query(
-                        image, task, context=history_actions, ocr_results=ocr_results,
+                        annotated_image, task, context=history_actions,
+                        ocr_results=ocr_results, extra_text=marker_extra,
                     )
                 except Exception as e:
                     category = classify_error(e)

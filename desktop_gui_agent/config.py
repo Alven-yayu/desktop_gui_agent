@@ -59,10 +59,28 @@ MODEL_MAX_TOKENS = 512  # 单次推理最大输出 token 数
 MODEL_GPU_MEMORY_RATIO = 0.75  # GPU 显存使用比例（0~1），防止 OOM。8GB → 6GB
 MODEL_GPU_MEMORY_GB = None  # 显存上限（GB），设为具体值则覆盖比例计算。None=自动按比例
 
+# ===== API 预设端点 =====
+# 通过 --api <name> 一键切换，无需手动填 URL 和 model name。
+# 密钥统一从环境变量读取（优先）或在此文件填写。
+API_PRESETS = {
+    "dashscope": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-vl-max",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "description": "阿里云灵积 DashScope（千问最强视觉模型，100w token 免费额度）",
+    },
+    "ollama": {
+        "base_url": "http://localhost:11434/v1",
+        "model": "qwen2.5:7b",
+        "api_key_env": None,  # Ollama 默认无需密钥
+        "description": "Ollama 本地部署（需先 ollama pull qwen2.5:7b）",
+    },
+}
+
 # ===== 双层 AI 架构配置（Phase 6）=====
 # 启用后，判断层（7B，脑子）分析屏幕+制定策略，
 # 执行层（2B，手）根据分析+OCR坐标输出精确动作。
-TWO_STAGE_ENABLED = True  # 是否启用双层架构（判断层分析 + 执行层精确操作）
+TWO_STAGE_ENABLED = False  # 双层架构暂关：7B API 单层推理能力已足够覆盖判断+执行
 MODEL_NAME_JUDGE = "Qwen/Qwen2-VL-2B-Instruct"  # 判断层模型（可与执行层相同，复用模型节省显存）
 MODEL_MODE_JUDGE = "local"  # 判断层推理模式："local" 或 "api"
 MODEL_API_URL_JUDGE = None  # 判断层 API 端点（如 Ollama: http://localhost:11434/v1）
@@ -107,84 +125,76 @@ AGENT_MAX_CONSECUTIVE_ERRORS = 3  # 连续错误次数阈值，超限则终止
 AGENT_STEP_DELAY = (0.5, 2.0)  # 步骤间随机延迟范围 (min, max)，单位秒
 
 # ===== Prompt 模板配置 =====
-PROMPT_SYSTEM = """你是桌面GUI智能体。你的任务是看截图、判断当前状态、思考下一步、输出动作。
-
-【工作方式】
-每次你会收到：截图 + OCR文字坐标 + 用户任务 + 已完成步骤
-你需要依次输出：
-
-观察：当前屏幕上有什么？和上一步相比有什么变化？
-分析：用户任务的目标是什么？当前进展到哪一步？下一步应该做什么？如果上一步动作没有效果，换一种什么方法？
-动作：输出一个具体动作（从以下五种中选一个）
-
-【有效动作】
-- click(x=<int>, y=<int>)      点击OCR提供的坐标
-- type(text="<str>")           输入文本（中文会自动粘贴）
-- scroll(direction="up|down", steps=<int>)  滚轮滚动
-- hotkey(key1, key2, ...)      组合键（如 hotkey(win, e) 打开资源管理器）
-- finish(result="<str>")       任务已完成，总结结果
+PROMPT_SYSTEM = """你是桌面GUI智能体。看截图、判断状态、输出动作。
 
 【输出格式】（严格三行）
-观察：<当前屏幕状态>
-分析：<思考过程>
-动作：<动作>
+观察：屏幕上有什么，和上一步比有什么变化
+分析：目标是什么，进展到哪一步，下一步做什么
+动作：从下面选一个
 
-【重要规则】
-- 使用OCR提供的坐标来点击，不要自己编坐标
-- 观察上一步是否有效：如果连续同样动作，说明方法不对，必须换方法
-- 组合键是强大的工具：hotkey(win, e)=打开资源管理器，hotkey(alt, f4)=关闭窗口，hotkey(ctrl, a)=全选
-- 确认任务完全完成后再输出finish"""
+【有效动作】
+- click_marker(N)              单击截图上橙色圆点编号N
+- double_click_marker(N)       双击截图上橙色圆点编号N（桌面图标用）
+- type(text="<str>")           输入文本
+- scroll(direction="up|down", steps=<int>)  滚轮
+- hotkey(key1, key2, ...)      组合键
+- finish(result="<str>")       任务完成
+
+【核心规则——必须遵守】
+1. 点目标用 click_marker(N) / double_click_marker(N)，N=截图橙色圆点编号
+2. 桌面图标用 double_click_marker，其他用 click_marker
+3. **打开开始菜单永远用 hotkey(win)，禁止点击开始按钮！开始按钮太小容易点偏**
+4. 没有标注点对应目标 → 用键盘（hotkey / type），不准猜坐标
+5. 上一步没效果立刻换方法
+6. 计算器任务流程：type("算式") → hotkey(enter) → finish
+   **不要看计算器显示什么来判断——输完直接按Enter就行！**
+   计算器显示"1"不代表只输了1，运算符后的数字还没显示而已
+7. 打开软件：桌面标注点 > hotkey(win)+type+enter > hotkey(win,e)
+8. 任务完成输出 finish"""
 
 
 PROMPT_USER_TEMPLATE = """用户任务：{task}
 请先观察屏幕和OCR结果，分析当前状态和下一步计划，然后输出动作。"""
 
 PROMPT_FEW_SHOT_EXAMPLES = [
-    # ===== 打开软件类 =====
+    # ===== 桌面有标注点 → 用编号 =====
     """示例A:
-任务: "打开计算器"
-观察：当前桌面可见，无计算器窗口。OCR识别到任务栏和桌面图标。需要先打开开始菜单
-分析：打开软件的标准方法是用Win键打开开始菜单，然后搜索软件名
-动作：hotkey(win)""",
+任务: "打开微信"
+观察：桌面上橙色标注#3是"微信"，图标位置在文字上方
+分析：微信在桌面，#3标注就是它，双击打开
+动作：double_click_marker(3)""",
 
+    # ===== 桌面没有 → 搜索 =====
     """示例B:
 任务: "打开计算器"
-观察：开始菜单已弹出，OCR识别到搜索框
-分析：上一步按了Win键成功打开了开始菜单，现在输入"计算器"搜索
-动作：type(text="计算器")""",
+观察：桌面标注点中没有"计算器"
+分析：桌面上没有，用Win键搜索
+动作：hotkey(win)""",
 
     """示例C:
 任务: "打开计算器"
-观察：搜索结果中出现"计算器"应用，OCR识别到"计算器"在中心(500,300)
-分析：搜索已找到计算器，按回车打开
+观察：开始菜单已打开，搜索框可见
+分析：输入搜索
+动作：type(text="计算器")""",
+
+    """示例D:
+任务: "打开计算器"
+观察：搜索结果出现"计算器"
+分析：按Enter打开
 动作：hotkey(enter)""",
 
-    # ===== 状态判断 + 换方法 =====
-    """示例D:
-任务: "打开D盘"
-观察：当前桌面可见，OCR识别到桌面图标有"回收站"在(100,500)、Edge浏览器在(200,300)，但没有D盘图标
-分析：桌面上没有D盘快捷方式。换一种方法：用Win+E直接打开文件资源管理器，左侧导航栏会有D盘
-动作：hotkey(win, e)""",
-
+    # ===== 键盘操作 =====
     """示例E:
-任务: "打开D盘"
-观察：文件资源管理器已打开，OCR识别到"本地磁盘(D:)"在中心(120,350)
-分析：资源管理器左侧导航栏可见D盘，点击它打开
-动作：click(x=120, y=350)""",
+任务: "计算1+1"
+观察：计算器已打开，显示0
+分析：直接用键盘输入算式，不点按钮
+动作：type(text="1+1")""",
 
-    # ===== 复合任务 + 进度跟踪 =====
     """示例F:
-任务: "打开D盘，删除文档1.pdf"
-观察：D盘已打开，OCR识别到文件列表中有"文档1.pdf"在中心(400,380)
-分析：已进入D盘，找到了目标文件。下一步右键点击文件，然后选择删除
-动作：click(x=400, y=380)""",
-
-    # ===== 失败重试 =====
-    """示例G:
-任务: "打开记事本"
-观察：桌面可见，OCR识别到任务栏。上一步按了Win键但开始菜单没有出现
-分析：Win键可能被拦截或没有生效。换一种方法：用hotkey(ctrl, esc)也能打开开始菜单
-动作：hotkey(ctrl, esc)""",
+任务: "计算1+1"
+观察：输入框中已有"1+1"
+分析：按等号出结果
+动作：hotkey(enter)""",
 ]
 
 PROMPT_COT_ENABLED = True

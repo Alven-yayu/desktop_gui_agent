@@ -932,13 +932,15 @@ class TestMain:
             "error": None,
         }
 
+        mock_hotkey = MagicMock()
         test_args = ["main.py", "打开计算器"]
         with patch.object(sys, "argv", test_args), \
-             patch("desktop_gui_agent.main.TaskManager", return_value=mock_tm):
+             patch("desktop_gui_agent.main.TaskManager", return_value=mock_tm), \
+             patch("desktop_gui_agent.main.GlobalHotkey", return_value=mock_hotkey):
             exit_code = main()
 
         assert exit_code == 0
-        mock_tm.run.assert_called_once_with("打开计算器")
+        mock_tm.run.assert_called_once_with("打开计算器", cancel_event=mock_hotkey.exit_event)
 
     def test_main_custom_max_steps(self):
         """--max-steps 参数应传递给 TaskManager"""
@@ -954,13 +956,17 @@ class TestMain:
             "error": None,
         }
 
+        mock_hotkey = MagicMock()
         test_args = ["main.py", "--max-steps", "10", "测试任务"]
         with patch.object(sys, "argv", test_args), \
-             patch("desktop_gui_agent.main.TaskManager", return_value=mock_tm) as mock_tm_cls:
+             patch("desktop_gui_agent.main.TaskManager", return_value=mock_tm) as mock_tm_cls, \
+             patch("desktop_gui_agent.main.GlobalHotkey", return_value=mock_hotkey):
             exit_code = main()
 
         assert exit_code == 0
-        mock_tm_cls.assert_called_once_with(max_steps=10, max_consecutive_errors=3)
+        mock_tm_cls.assert_called_once_with(
+            max_steps=10, max_consecutive_errors=3, api_preset=None
+        )
 
     def test_main_returns_1_on_failure(self):
         """任务失败时 main() 应返回 1"""
@@ -976,9 +982,11 @@ class TestMain:
             "error": "达到最大步数上限",
         }
 
+        mock_hotkey = MagicMock()
         test_args = ["main.py", "不可能的任务"]
         with patch.object(sys, "argv", test_args), \
-             patch("desktop_gui_agent.main.TaskManager", return_value=mock_tm):
+             patch("desktop_gui_agent.main.TaskManager", return_value=mock_tm), \
+             patch("desktop_gui_agent.main.GlobalHotkey", return_value=mock_hotkey):
             exit_code = main()
 
         assert exit_code == 1
@@ -997,17 +1005,22 @@ class TestMain:
             "error": None,
         }
 
+        mock_hotkey = MagicMock()
+        mock_hotkey.exit_event.is_set.return_value = False  # 不触发退出
         # 模拟：无命令行参数 → 交互模式 → 用户输入任务 → 然后退出
         test_args = ["main.py"]
         with patch.object(sys, "argv", test_args), \
              patch.object(sys.stdin, "isatty", return_value=True), \
              patch("desktop_gui_agent.main.TaskManager", return_value=mock_tm), \
+             patch("desktop_gui_agent.main.GlobalHotkey", return_value=mock_hotkey), \
              patch("builtins.input", side_effect=["用户输入的任务", "exit"]), \
              patch("desktop_gui_agent.main.time.sleep"):  # 跳过实际延时
             exit_code = main()
 
         assert exit_code == 0
-        mock_tm.run.assert_called_once_with("用户输入的任务")
+        mock_tm.run.assert_called_once_with(
+            "用户输入的任务", cancel_event=mock_hotkey.exit_event
+        )
 
 
 # ===== Prompt 拼接测试 =====
@@ -1145,9 +1158,9 @@ class TestTwoStage:
     # ---- 配置检查 ----
 
     def test_two_stage_config_defaults(self):
-        """双层架构配置项应存在且默认开启（judge和执行层复用同模型，无额外开销）"""
+        """双层架构配置项应存在（默认关闭，7B API 单层推理已覆盖判断+执行）"""
         import desktop_gui_agent.config as config
-        assert config.TWO_STAGE_ENABLED is True
+        assert config.TWO_STAGE_ENABLED is False  # Phase 5: 7B API 单层够用
         assert isinstance(config.MODEL_NAME_JUDGE, str)
         assert config.MODEL_MODE_JUDGE in ("local", "api")
         assert isinstance(config.PROMPT_JUDGE_SYSTEM, str)
@@ -1334,3 +1347,185 @@ class TestTwoStage:
         assert client.judge_mode == "api"
         assert client.judge_model_name == "Qwen/Qwen2-VL-7B-Instruct"
         assert client.judge_api_url == "http://localhost:11434/v1"
+
+
+# ===== API 预设测试 =====
+
+class TestApiPreset:
+    """_resolve_api_preset() 测试"""
+
+    def test_resolve_dashscope_preset(self):
+        """DashScope 预设应返回正确的 mode/model/url"""
+        from desktop_gui_agent.agent.model_client import _resolve_api_preset
+        result = _resolve_api_preset("dashscope")
+        assert result["mode"] == "api"
+        assert result["model_name"] == "qwen-vl-max"
+        assert "dashscope.aliyuncs.com" in result["api_url"]
+        assert "api_key" in result
+
+    def test_resolve_ollama_preset(self):
+        """Ollama 预设应返回正确的 mode/model/url"""
+        from desktop_gui_agent.agent.model_client import _resolve_api_preset
+        result = _resolve_api_preset("ollama")
+        assert result["mode"] == "api"
+        assert result["model_name"] == "qwen2.5:7b"
+        assert "localhost:11434" in result["api_url"]
+
+    def test_resolve_none_preset_returns_empty(self):
+        """preset=None 应返回空字典"""
+        from desktop_gui_agent.agent.model_client import _resolve_api_preset
+        assert _resolve_api_preset(None) == {}
+        assert _resolve_api_preset("") == {}
+
+    def test_resolve_unknown_preset_raises(self):
+        """未知预设应抛出 ModelError"""
+        import pytest
+        from desktop_gui_agent.agent.model_client import _resolve_api_preset
+        from desktop_gui_agent.utils.exceptions import ModelError
+        with pytest.raises(ModelError, match="不存在"):
+            _resolve_api_preset("unknown_preset")
+
+    def test_model_client_applies_api_preset(self):
+        """ModelClient 初始化时应正确应用 api_preset"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        client = ModelClient(api_preset="dashscope")
+        assert client.mode == "api"
+        assert "qwen-vl-max" == client.model_name
+        assert "dashscope" in client.api_url
+
+    def test_api_preset_overrides_mode(self):
+        """api_preset 应覆盖显式的 mode 参数"""
+        from desktop_gui_agent.agent.model_client import ModelClient
+        client = ModelClient(mode="local", api_preset="ollama")
+        # preset 优先，mode 被覆盖为 api
+        assert client.mode == "api"
+        assert "qwen2.5:7b" in client.model_name
+
+    def test_dashscope_preset_reads_key_from_env(self, monkeypatch):
+        """DashScope 预设应从 DASHSCOPE_API_KEY 环境变量读取密钥"""
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test-key-123")
+        from desktop_gui_agent.agent.model_client import _resolve_api_preset
+        result = _resolve_api_preset("dashscope")
+        assert result["api_key"] == "sk-test-key-123"
+
+
+# ===== CLI --api 参数测试 =====
+
+class TestCliApiArg:
+    """main.py --api 参数测试"""
+
+    def test_parse_api_dashscope(self):
+        """--api dashscope 应被正确解析"""
+        from desktop_gui_agent.main import _parse_args
+        args = _parse_args(["--api", "dashscope", "打开记事本"])
+        assert args.api == "dashscope"
+        assert args.task == "打开记事本"
+
+    def test_parse_api_ollama(self):
+        """--api ollama 应被正确解析"""
+        from desktop_gui_agent.main import _parse_args
+        args = _parse_args(["--api", "ollama", "打开计算器"])
+        assert args.api == "ollama"
+
+    def test_parse_api_local(self):
+        """--api local 应被正确解析"""
+        from desktop_gui_agent.main import _parse_args
+        args = _parse_args(["--api", "local", "任务"])
+        assert args.api == "local"
+
+    def test_parse_no_api_defaults_to_none(self):
+        """不传 --api 时默认为 None"""
+        from desktop_gui_agent.main import _parse_args
+        args = _parse_args(["打开记事本"])
+        assert args.api is None
+
+    def test_parse_api_invalid_choice_rejected(self):
+        """无效 --api 值应被 argparse 拒绝"""
+        import pytest
+        from desktop_gui_agent.main import _parse_args
+        with pytest.raises(SystemExit):
+            _parse_args(["--api", "invalid", "任务"])
+
+
+# ===== 全局快捷键测试 =====
+
+class TestGlobalHotkey:
+    """GlobalHotkey 测试 — Ctrl+Alt+Q 安全退出"""
+
+    def test_init_default(self):
+        """默认初始化应成功，exit_event 未设置"""
+        from desktop_gui_agent.utils.global_hotkey import GlobalHotkey
+        import threading
+
+        hotkey = GlobalHotkey()
+        assert hotkey.exit_event is not None
+        assert isinstance(hotkey.exit_event, threading.Event)
+        assert hotkey.exit_event.is_set() is False
+
+    def test_init_with_callback(self):
+        """初始化时应接受回调函数"""
+        from desktop_gui_agent.utils.global_hotkey import GlobalHotkey
+
+        called = []
+
+        def on_exit():
+            called.append(True)
+
+        hotkey = GlobalHotkey(on_exit=on_exit)
+        assert hotkey._on_exit is on_exit
+
+    def test_start_stop(self):
+        """start() 和 stop() 应正常启停"""
+        from desktop_gui_agent.utils.global_hotkey import GlobalHotkey
+
+        hotkey = GlobalHotkey()
+        hotkey.start()
+        assert hotkey._listener is not None
+        assert hotkey._thread is not None
+
+        hotkey.stop()
+        assert hotkey._listener is None
+        assert hotkey._thread is None
+
+    def test_double_start_is_safe(self):
+        """重复 start() 应安全跳过"""
+        from desktop_gui_agent.utils.global_hotkey import GlobalHotkey
+
+        hotkey = GlobalHotkey()
+        hotkey.start()
+        first_listener = hotkey._listener
+        hotkey.start()  # 不应崩溃
+        assert hotkey._listener is first_listener  # 未重新创建
+
+        hotkey.stop()
+
+    def test_double_stop_is_safe(self):
+        """重复 stop() 应安全跳过"""
+        from desktop_gui_agent.utils.global_hotkey import GlobalHotkey
+
+        hotkey = GlobalHotkey()
+        hotkey.start()
+        hotkey.stop()
+        hotkey.stop()  # 不应崩溃
+
+    def test_filter_injected_events(self):
+        """win32_event_filter 应过滤注入事件"""
+        from desktop_gui_agent.utils.global_hotkey import GlobalHotkey
+        from unittest.mock import MagicMock
+
+        # LLKHF_INJECTED = 0x10
+        class FakeData:
+            flags = 0x10  # injected
+
+        result = GlobalHotkey._filter_injected(None, FakeData())
+        assert result is False  # 应丢弃注入事件
+
+    def test_filter_pass_real_events(self):
+        """win32_event_filter 应放行真实事件"""
+        from desktop_gui_agent.utils.global_hotkey import GlobalHotkey
+
+        class FakeData:
+            flags = 0x00  # not injected
+
+        result = GlobalHotkey._filter_injected(None, FakeData())
+        assert result is True  # 应放行真实事件

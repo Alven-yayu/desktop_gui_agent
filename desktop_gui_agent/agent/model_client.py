@@ -7,6 +7,7 @@
 """
 import base64
 import io
+import os
 import time
 from typing import Optional
 
@@ -29,6 +30,46 @@ from desktop_gui_agent.utils.logger import get_logger
 # 判断层和执行层分开，脑子管策略，手管精确坐标
 _EXECUTOR_MAX_TOKENS = 128  # 执行层输出极短（只需一个动作），防止长篇生成卡住
 _JUDGE_MAX_TOKENS = _config.MODEL_MAX_TOKENS_JUDGE  # 判断层输出更短
+
+
+def _resolve_api_preset(preset: Optional[str]) -> dict:
+    """根据预设名称解析 API 配置。
+
+    Args:
+        preset: 预设名称（"dashscope" / "ollama"），None 或空字符串不解析。
+
+    Returns:
+        {"mode": str, "model_name": str, "api_url": str, "api_key": str}
+        若 preset 为 None 则返回空字典。
+
+    Raises:
+        ModelError: 预设名称不存在。
+    """
+    if not preset:
+        return {}
+
+    presets = getattr(_config, "API_PRESETS", {})
+    if preset not in presets:
+        raise ModelError(
+            f"API 预设 '{preset}' 不存在。可用预设: {list(presets.keys())}"
+        )
+
+    entry = presets[preset]
+    api_key = ""
+    if entry.get("api_key_env"):
+        api_key = os.environ.get(entry["api_key_env"], "")
+        if not api_key:
+            logger.warning(
+                f"API 预设 '{preset}' 需要环境变量 {entry['api_key_env']}，"
+                f"但未设置。请运行: set {entry['api_key_env']}=你的Key"
+            )
+
+    return {
+        "mode": "api",
+        "model_name": entry["model"],
+        "api_url": entry["base_url"],
+        "api_key": api_key,
+    }
 
 logger = get_logger(__name__)
 
@@ -64,6 +105,8 @@ class ModelClient:
         judge_model_name: Optional[str] = None,
         judge_api_url: Optional[str] = None,
         judge_api_key: Optional[str] = None,
+        # API 预设（一键切换）
+        api_preset: Optional[str] = None,
     ):
         """初始化模型客户端。
 
@@ -76,10 +119,22 @@ class ModelClient:
             judge_model_name: 判断层模型，None 则使用 config.MODEL_NAME_JUDGE。
             judge_api_url: 判断层 API 端点，None 则使用 config.MODEL_API_URL_JUDGE。
             judge_api_key: 判断层 API 密钥，None 则使用 config.MODEL_API_KEY_JUDGE。
+            api_preset: API 预设名称（"dashscope" / "ollama"），
+                        自动解析 mode/model_name/api_url/api_key。
+                        None 则使用默认 config 值。
 
         Raises:
             ModelError: 模式不合法或模型加载失败。
         """
+        # 应用 API 预设（优先于单独参数）
+        preset = _resolve_api_preset(api_preset)
+        if preset:
+            mode = preset["mode"]
+            model_name = preset["model_name"]
+            api_url = preset["api_url"]
+            api_key = preset["api_key"]
+            logger.info(f"API 预设 '{api_preset}' 已应用: {preset['model_name']} @ {preset['api_url']}")
+
         if mode not in ("local", "api"):
             raise ModelError(f"不支持的推理模式: {mode}，可选 'local' 或 'api'")
 
@@ -136,6 +191,36 @@ class ModelClient:
             system += "\n\n" + "\n\n".join(_config.PROMPT_FEW_SHOT_EXAMPLES)
         return system
 
+    @staticmethod
+    def _extract_keywords(task: str) -> list:
+        """从任务文本中提取关键词，用于 OCR 结果排序。
+
+        对中文任务：提取所有 2-4 字的连续中文片段。
+        对英文任务：提取所有单词。
+
+        Args:
+            task: 用户任务文本。
+
+        Returns:
+            关键词列表（去重）。
+        """
+        import re
+        keywords = []
+        # 提取中文词组（2-4字）
+        chinese_words = re.findall(r'[一-鿿]{2,4}', task)
+        keywords.extend(chinese_words)
+        # 对每个中文词组，再拆出所有2字子串（如"打开微信"→"打开"+"微信"）
+        for word in chinese_words:
+            for i in range(len(word) - 1):
+                sub = word[i:i+2]
+                if sub not in keywords:
+                    keywords.append(sub)
+        # 提取英文单词
+        english_words = re.findall(r'[a-zA-Z]{2,}', task)
+        keywords.extend(english_words)
+        return list(set(keywords))
+
+
     # OCR 噪声过滤 —— 终端/CLI 文字和 agent 自己的 UI
     _OCR_NOISE_PATTERNS = [
         # Agent 自己的 UI
@@ -168,9 +253,12 @@ class ModelClient:
         import re
         if re.search(r'[A-Z]:[\\/]', text):
             return True
-        # 4. 太短（1-2 字符碎片，往往是噪声）
-        if len(text.strip()) <= 2:
+        # 4. 太短（1 字符 / 纯ASCII 2字符碎片往往是噪声，但2字中文可能是有效文本如"微信"）
+        stripped = text.strip()
+        if len(stripped) <= 1:
             return True
+        if len(stripped) == 2 and stripped.isascii():
+            return True  # 如 "OK", "ab" 等才是噪声
         # 5. 纯标点/特殊字符
         if re.match(r'^[\s\-_=#*.:;,/\\|><]+$', text):
             return True
@@ -178,7 +266,7 @@ class ModelClient:
 
     @staticmethod
     def _build_ocr_text(ocr_results: list, include_coords: bool = True,
-                        max_items: int = 30, task: str = "") -> str:
+                        max_items: int = 15, task: str = "") -> str:
         """将 OCR 结果格式化为 prompt 文本。
 
         自动过滤掉终端/CLI/agent UI 噪声文字。
@@ -191,15 +279,29 @@ class ModelClient:
         """
         if not ocr_results:
             return ""
+        # 排序：任务相关关键词优先排在前面（确保目标不在屏幕上时不被裁掉）
+        task_keywords = ModelClient._extract_keywords(task)
+        sorted_results = sorted(
+            ocr_results,
+            key=lambda item: (
+                not any(kw in item["text"] or item["text"] in kw
+                    for kw in task_keywords),  # 双向匹配：任务词↔OCR文本
+            ),
+        )
         lines = []
-        for item in ocr_results[:max_items]:
+        for item in sorted_results[:max_items]:
             text = item["text"]
             if ModelClient._is_ocr_noise(text, task):
                 continue
             if include_coords:
                 x1, y1, x2, y2 = item["bbox"]
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                lines.append(f'  "{text}" 中心({cx},{cy})')
+                text_h = y2 - y1
+                # 图标在文字上方约半个文字高度（~15-25px），开始菜单和桌面都适用
+                icon_y = max(0, y1 - text_h)
+                lines.append(
+                    f'  "{text}" 图标({cx},{icon_y}) 文字({cx},{cy})'
+                )
             else:
                 lines.append(f'  "{text}"')
         if not lines:
@@ -243,6 +345,7 @@ class ModelClient:
         task: str,
         context: Optional[list] = None,
         ocr_results: Optional[list] = None,
+        extra_text: str = "",
     ) -> str:
         """向模型发送截图和任务，返回模型响应。
 
@@ -279,7 +382,7 @@ class ModelClient:
                 # 降级为单层，继续执行
 
         # 单层模式（默认/降级）
-        return self._query_single(image, task, context, ocr_results)
+        return self._query_single(image, task, context, ocr_results, extra_text)
 
     def _query_two_stage(
         self, image: Image.Image, task: str,
@@ -328,9 +431,10 @@ class ModelClient:
     def _query_single(
         self, image: Image.Image, task: str,
         context: list, ocr_results: list,
+        extra_text: str = "",
     ) -> str:
         """单层推理（原逻辑，兼容 TWO_STAGE_ENABLED=False）。"""
-        user_prompt = self._build_user_prompt(task, context, ocr_results)
+        user_prompt = self._build_user_prompt(task, context, ocr_results, extra_text=extra_text)
 
         if self.mode == "local":
             return self._query_local(image, user_prompt, self.model_name)

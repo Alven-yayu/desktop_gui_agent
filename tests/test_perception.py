@@ -105,3 +105,41 @@ class TestDrawBoxes:
         locator.draw_boxes(sample_image, sample_ocr_results, output_path=output_path)
         import os
         assert os.path.exists(output_path)
+
+
+# ===== 终端窗口最小化测试 =====
+
+class TestMinimizeConsole:
+    """minimize_console() 测试"""
+
+    def test_minimize_console_exists(self):
+        """minimize_console 函数应可导入"""
+        from desktop_gui_agent.perception.screenshot import minimize_console
+        assert callable(minimize_console)
+
+    def test_minimize_console_returns_bool(self):
+        """minimize_console 应返回布尔值"""
+        from desktop_gui_agent.perception.screenshot import minimize_console
+        result = minimize_console()
+        assert isinstance(result, bool)
+
+    def test_minimize_console_no_error_on_non_windows(self, monkeypatch):
+        """非 Windows 平台应直接返回 False，不报错"""
+        monkeypatch.setattr("sys.platform", "darwin")
+        from desktop_gui_agent.perception.screenshot import minimize_console
+        result = minimize_console()
+        assert result is False
+
+    def test_minimize_console_no_console_window(self, monkeypatch):
+        """无控制台句柄时函数不应崩溃（回退到 EnumWindows 或返回 False）"""
+        monkeypatch.setattr("sys.platform", "win32")
+        from unittest.mock import patch
+
+        from desktop_gui_agent.perception.screenshot import minimize_console
+
+        # Mock GetConsoleWindow 返回 0 + EnumWindows 不抛异常
+        with patch("ctypes.windll.kernel32.GetConsoleWindow", return_value=0), \
+             patch("desktop_gui_agent.perception.screenshot._minimize_own_windows",
+                   return_value=False):
+            result = minimize_console()
+            assert isinstance(result, bool)  # 不崩溃即可，True 或 False 都行

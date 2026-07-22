@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import scrolledtext, ttk
 
 from desktop_gui_agent.agent.task_manager import TaskManager
+from desktop_gui_agent.utils.global_hotkey import GlobalHotkey
 from desktop_gui_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -19,17 +20,23 @@ _task_queue: queue.Queue = queue.Queue()
 _shutdown: bool = False
 
 
-def _worker(tm: TaskManager, app: "App"):
+def _worker(tm: TaskManager, app: "App", hotkey: GlobalHotkey):
     """后台工作线程：加载模型，从队列取任务，执行。"""
     global _shutdown
 
     # 模型将在第一个任务执行时自动加载
     app.log("Agent 已就绪，输入第一个任务时自动加载模型（约15秒）")
+    app.log("按 Ctrl+Alt+Q 可随时安全退出")
     app.set_status("就绪，请输入任务")
     app.enable_input()
 
     # 循环执行任务
     while not _shutdown:
+        # 检查全局热键退出
+        if hotkey.exit_event.is_set():
+            app.log("⚠ Ctrl+Alt+Q 触发退出")
+            break
+
         try:
             task = _task_queue.get(timeout=0.5)
         except queue.Empty:
@@ -42,10 +49,19 @@ def _worker(tm: TaskManager, app: "App"):
         app.set_status(f"正在执行: {task}")
         app.disable_input()
 
-        # 创建新的取消事件，传进 run()，让 GUI 可以中途终止
-        app.cancel_event.clear()
+        # 合并全局热键和 GUI 终止按钮的信号
+        combined_cancel = threading.Event()
+        def _check_cancel():
+            while not combined_cancel.is_set():
+                if hotkey.exit_event.is_set() or app.cancel_event.is_set():
+                    combined_cancel.set()
+                    break
+                combined_cancel.wait(0.2)
+        cancel_thread = threading.Thread(target=_check_cancel, daemon=True)
+        cancel_thread.start()
+
         try:
-            result = tm.run(task, cancel_event=app.cancel_event)
+            result = tm.run(task, cancel_event=combined_cancel)
             if result["success"]:
                 app.log(f"✅ 完成，共 {result['steps']} 步")
                 if result["result"]:
@@ -56,6 +72,7 @@ def _worker(tm: TaskManager, app: "App"):
         except Exception as e:
             app.log(f"❌ 异常: {e}")
 
+        combined_cancel.set()  # 通知 cancel 线程退出
         app.set_status("就绪，请输入任务")
         app.enable_input()
 
@@ -188,18 +205,24 @@ class App:
 
 def launch():
     """启动 GUI 窗口。"""
+    hotkey = GlobalHotkey()
+    hotkey.start()
+
     root = tk.Tk()
     app = App(root)
 
     # 启动后台工作线程（模型在第一个任务时加载）
     tm = TaskManager()
-    t = threading.Thread(target=_worker, args=(tm, app), daemon=True)
+    t = threading.Thread(target=_worker, args=(tm, app, hotkey), daemon=True)
     t.start()
 
     # 初始状态：输入已启用
     app.enable_input()
 
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        hotkey.stop()
 
 
 if __name__ == "__main__":

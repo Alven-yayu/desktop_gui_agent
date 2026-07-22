@@ -5,7 +5,11 @@
 所有公共方法统一返回 bool，不抛异常。
 
 中文输入策略：非ASCII文本通过剪贴板 + Ctrl+V 粘贴。
+
+异常安全：通过 atexit 注册保底释放，即使程序崩溃也能释放所有按键，
+防止键盘被"占住"无法使用。
 """
+import atexit
 import random
 import time
 from typing import Optional, Set
@@ -102,7 +106,20 @@ class KeyboardController:
         self._keyboard = Controller()
         self._mouse = MouseScrollController()
         self._pressed_keys: Set = set()
+        # 注册 atexit 保底释放：即使程序崩溃，也尽力释放所有按键
+        atexit.register(self._release_all)
         logger.info("键盘控制器初始化完成")
+
+    def __enter__(self) -> "KeyboardController":
+        """上下文管理器入口。"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """上下文管理器出口 — 无论如何都释放所有按键。"""
+        self._release_all()
+        if exc_type is not None:
+            logger.error(f"KeyboardController 异常退出: {exc_val}")
+        # 不抑制异常（返回 None = 让异常继续传播）
 
     # ===== 公共方法 =====
 
@@ -125,10 +142,10 @@ class KeyboardController:
             return True
 
         try:
-            if self._is_ascii(text):
-                self._type_ascii(text)
-            else:
+            if not self._is_ascii(text):
                 self._type_via_clipboard(text)
+            else:
+                self._type_ascii(text)
             logger.debug(f"文本输入成功，长度={len(text)}")
             return True
         except Exception as e:
@@ -239,27 +256,27 @@ class KeyboardController:
 
     # ===== 内部方法 =====
 
+    # 需要 Shift 或 AltGr 的字符，pynput 逐字输入可能不准确，走剪贴板
+    _SPECIAL_CHARS = set("+*/-=()[]{}<>!@#$%^&|\\~`'\"")
+
     @staticmethod
-    def _is_ascii(text: str) -> bool:
-        """检查文本是否全部为ASCII字符。"""
+    def _needs_clipboard(text: str) -> bool:
+        """判断文本是否需要走剪贴板粘贴（含特殊字符或中文）。"""
         try:
             text.encode("ascii")
-            return True
         except UnicodeEncodeError:
-            return False
+            return True  # 非 ASCII → 剪贴板
+        return bool(set(text) & KeyboardController._SPECIAL_CHARS)
 
     def _type_ascii(self, text: str) -> None:
-        """逐字符输入ASCII文本，模拟人工打字。
+        """输入纯 ASCII 文本。
 
-        Args:
-            text: 纯ASCII文本。
+        pynput Controller.type() 自动处理 Shift/AltGr 修饰键，
+        比逐字符 press/release 更可靠。
         """
-        min_delay, max_delay = KEYBOARD_TYPE_DELAY
-        for char in text:
-            self._keyboard.press(char)
-            self._keyboard.release(char)
-            delay = random.uniform(min_delay, max_delay)
-            time.sleep(delay)
+        # 使用 pynput 内置 type，它内部处理所有按键映射
+        self._keyboard.type(text)
+        time.sleep(0.05 * len(text))  # 等待输入完成
 
     def _type_via_clipboard(self, text: str) -> None:
         """通过剪贴板粘贴输入中文文本。

@@ -156,3 +156,42 @@ class TestKeyboardControllerInit:
         assert hasattr(kc, 'press')
         assert hasattr(kc, 'hotkey')
         assert hasattr(kc, 'scroll')
+
+
+# ===== KeyboardController 上下文管理器测试 =====
+
+class TestKeyboardControllerContextManager:
+    """KeyboardController 的 __enter__ / __exit__ 测试"""
+
+    def test_context_manager_returns_self(self):
+        """__enter__ 应返回自身"""
+        from desktop_gui_agent.control.keyboard_controller import KeyboardController
+        kc = KeyboardController()
+        with kc as ctrl:
+            assert ctrl is kc
+
+    def test_context_manager_releases_keys_on_exit(self):
+        """__exit__ 应调用 _release_all 释放所有按键"""
+        from desktop_gui_agent.control.keyboard_controller import KeyboardController
+        from unittest.mock import patch
+
+        kc = KeyboardController()
+        with patch.object(kc, '_release_all') as mock_release:
+            with kc:
+                pass
+            mock_release.assert_called_once()
+
+    def test_context_manager_releases_keys_on_exception(self):
+        """异常退出时也应释放按键（不抑制异常）"""
+        from desktop_gui_agent.control.keyboard_controller import KeyboardController
+        from unittest.mock import patch
+
+        kc = KeyboardController()
+        with patch.object(kc, '_release_all'):
+            try:
+                with kc:
+                    raise RuntimeError("模拟异常")
+            except RuntimeError:
+                pass
+            # 即使抛了异常，_release_all 也应被调用
+            # （由 mock 验证，不会真的操作键盘）

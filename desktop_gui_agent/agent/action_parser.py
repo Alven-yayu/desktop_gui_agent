@@ -13,10 +13,25 @@ from desktop_gui_agent.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ===== 各动作的正则表达式 =====
-# 匹配格式: action_name(key1=val1, key2=val2, ...)
+
+# marker 动作（推荐！模型只需指定编号，代码翻译为坐标）
+_PATTERN_CLICK_MARKER = re.compile(
+    r'click_marker\s*\(\s*(\d+)\s*\)',
+    re.IGNORECASE,
+)
+_PATTERN_DOUBLE_CLICK_MARKER = re.compile(
+    r'double_click_marker\s*\(\s*(\d+)\s*\)',
+    re.IGNORECASE,
+)
+
+# 传统坐标动作（兼容旧版，不推荐）
+_PATTERN_DOUBLE_CLICK = re.compile(
+    r'double_click\s*\(\s*x\s*=\s*(-?\d+)\s*,\s*y\s*=\s*(-?\d+)\s*\)',
+    re.IGNORECASE,
+)
 
 _PATTERN_CLICK = re.compile(
-    r'click\s*\(\s*x\s*=\s*(-?\d+)\s*,\s*y\s*=\s*(-?\d+)\s*\)',
+    r'(?<!_)click\s*\(\s*x\s*=\s*(-?\d+)\s*,\s*y\s*=\s*(-?\d+)\s*\)',
     re.IGNORECASE,
 )
 
@@ -85,6 +100,21 @@ def parse(model_output: Optional[str]) -> Dict[str, Any]:
     return {"action_type": "unknown", "raw": text}
 
 
+def _build_click_marker_params(match: re.Match) -> Dict[str, int]:
+    """从正则匹配结果构建 click_marker 参数字典。"""
+    return {"marker": int(match.group(1))}
+
+
+def _build_double_click_marker_params(match: re.Match) -> Dict[str, int]:
+    """从正则匹配结果构建 double_click_marker 参数字典。"""
+    return {"marker": int(match.group(1))}
+
+
+def _build_double_click_params(match: re.Match) -> Dict[str, int]:
+    """从正则匹配结果构建 double_click 参数字典。"""
+    return {"x": int(match.group(1)), "y": int(match.group(2))}
+
+
 def _build_click_params(match: re.Match) -> Dict[str, int]:
     """从正则匹配结果构建 click 参数字典。"""
     return {"x": int(match.group(1)), "y": int(match.group(2))}
@@ -127,6 +157,11 @@ def _build_finish_params(match: re.Match) -> Dict[str, str]:
 
 # 解析器列表，按优先级排序：click > type > scroll > hotkey > finish
 _PARSERS = [
+    # marker 动作优先——模型只需给编号，代码翻译坐标
+    (_PATTERN_CLICK_MARKER, "click_marker", _build_click_marker_params),
+    (_PATTERN_DOUBLE_CLICK_MARKER, "double_click_marker", _build_double_click_marker_params),
+    # 传统坐标动作（兼容）
+    (_PATTERN_DOUBLE_CLICK, "double_click", _build_double_click_params),
     (_PATTERN_CLICK, "click", _build_click_params),
     (_PATTERN_TYPE, "type", _build_type_params),
     (_PATTERN_SCROLL, "scroll", _build_scroll_params),
