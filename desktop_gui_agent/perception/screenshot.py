@@ -372,29 +372,56 @@ def _init_terminal_avoidance() -> bool:
     return False
 
 
-# ===== 截图标注：在图像上标记 OCR 检测位置 =====
+# ===== 截图标注：在图像上标记 UIA 控件 + OCR 文字位置 =====
+
+# UIA 控件标注视觉常量
+UIA_RECT_COLOR = (0, 200, 83)       # 绿色，Material Green A700
+UIA_RECT_WIDTH = 3                   # 矩形框线宽（像素）
+UIA_RECT_FILL = (0, 200, 83, 38)     # 半透明绿色填充（RGBA）
+
+# OCR 标注视觉常量
+OCR_DOT_COLOR = (255, 80, 20)        # 橙色
+OCR_OUTLINE_COLOR = (255, 255, 255)  # 白色外圈
+OCR_DOT_RADIUS = 16
+
+# 去重：OCR bbox 与 UIA bbox 的 IoU 超过此阈值则跳过
+_UIA_OCR_IOU_THRESHOLD = 0.2
+
 
 def annotate_screenshot(
     image: Image.Image,
     ocr_results: list,
-    max_items: int = 15,
+    max_items: int = 20,
     task: str = "",
+    uia_controls: list = None,
 ) -> tuple:
-    """在截图上绘制带编号的标记点，返回标注后的图像和编号→坐标映射表。
+    """在截图上标注可交互元素，返回标注图和编号→坐标映射表。
 
-    每个 OCR 元素画一个小圆点+编号，让模型通过视觉直接确认位置，
-    从根本上解决"模型不信 OCR 坐标、自己编数字"的问题。
+    融合两种感知源：
+    - UIA 控件 → 绿色矩形框 + 白色编号，精确覆盖按钮等 Windows 控件
+    - OCR 文字 → 橙色圆点 + 白色编号，覆盖非标准 UI（桌面、任务栏等）
+    统一编号：UIA 优先（1,2,3…），OCR 去重后接在后面（N+1, N+2…）
 
     Args:
         image: 原始截图。
-        ocr_results: OCR 结果列表。
-        max_items: 最多标注 N 个元素。
-        task: 任务文本，用于关键词排序。
+        ocr_results: OCR 结果列表，每项含 {"text", "bbox": (l,t,r,b), "confidence"}。
+        max_items: 最多标注 N 个元素（UIA + OCR 总和）。
+        task: 任务文本，用于 OCR 关键词排序。
+        uia_controls: UIA 控件列表，每项含 {"name", "control_type", "bbox": (l,t,r,b)}。
+                      None 或空列表表示无 UIA 数据（纯 OCR 模式）。
 
     Returns:
         (annotated_image, marker_map)
         annotated_image: 标注后的 PIL Image。
-        marker_map: {编号: {"text": str, "icon": (x,y), "text_center": (x,y)}}
+        marker_map: OrderedDict {
+            编号: {
+                "source": "uia" | "ocr",
+                "text": str,
+                "control_type": str | None,
+                "bbox": (l, t, r, b),
+                "click_point": (cx, cy),
+            }
+        }
     """
     from collections import OrderedDict
 
@@ -402,16 +429,95 @@ def annotate_screenshot(
 
     from desktop_gui_agent.agent.model_client import ModelClient
 
+    uia_controls = uia_controls or []
+
+    # ---- 先创建半透明叠加层画矩形框 ----
+    # PIL 直接画线会完全遮挡框内内容。
+    # 用 RGBA 叠加层画半透明填充 + 实线边框，然后粘贴回原图。
     annotated = image.copy()
-    draw = ImageDraw.Draw(annotated)
+    overlay = Image.new("RGBA", annotated.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    main_draw = ImageDraw.Draw(annotated)
 
-    # 颜色：高饱和橙色圆点 + 白色编号（深色/浅色背景都可见）
-    DOT_COLOR = (255, 80, 20)
-    OUTLINE_COLOR = (255, 255, 255)
-    TEXT_COLOR = (255, 255, 255)
-    DOT_RADIUS = 16
+    # 加载字体
+    try:
+        font = ImageFont.truetype("segoeui.ttf", 13)  # Segoe UI 在 Windows 上更适合小字号标注
+    except (OSError, IOError):
+        try:
+            font = ImageFont.truetype("C:\\Windows\\Fonts\\segoeui.ttf", 13)
+        except (OSError, IOError):
+            try:
+                font = ImageFont.truetype("arial.ttf", 14)
+            except (OSError, IOError):
+                try:
+                    font = ImageFont.truetype("C:\\Windows\\Fonts\\arial.ttf", 14)
+                except (OSError, IOError):
+                    font = ImageFont.load_default()
 
-    # 关键词排序（与 _build_ocr_text 一致）
+    marker_map = OrderedDict()
+    marker_num = 1
+
+    # ===== 第一轮：UIA 控件 → 绿色矩形框 =====
+    for ctrl in uia_controls:
+        if marker_num > max_items:
+            break
+
+        left, top, right, bottom = ctrl["bbox"]
+        w, h = right - left, bottom - top
+
+        # 跳过过小或过大的控件
+        if w < 8 or h < 8:
+            continue
+        if w > image.width * 0.9 or h > image.height * 0.9:
+            continue
+
+        # 半透明绿色填充（叠加层）
+        overlay_draw.rectangle(
+            [left, top, right, bottom],
+            fill=UIA_RECT_FILL,
+        )
+        # 实线边框（画在主图层，清晰可见）
+        main_draw.rectangle(
+            [left, top, right, bottom],
+            outline=UIA_RECT_COLOR,
+            width=UIA_RECT_WIDTH,
+        )
+
+        # 编号标签：贴在矩形框左上角外侧，白色文字 + 绿色底色小标签
+        num_str = str(marker_num)
+        label_w = 22
+        label_h = 20
+        label_x = left
+        label_y = max(0, top - label_h)  # 贴在框上方
+
+        # 绿色标签底色
+        overlay_draw.rectangle(
+            [label_x, label_y, label_x + label_w, label_y + label_h],
+            fill=(0, 200, 83, 210),
+        )
+        # 标签上编号
+        tw = len(num_str) * 7
+        main_draw.text(
+            (label_x + (label_w - tw) // 2, label_y + 2),
+            num_str, fill=(255, 255, 255), font=font,
+        )
+
+        ctrl_name = ctrl.get("name", "")
+        ctrl_type = ctrl.get("control_type", "")
+
+        marker_map[marker_num] = {
+            "source": "uia",
+            "text": ctrl_name if ctrl_name else ctrl_type,
+            "control_type": ctrl_type,
+            "bbox": (left, top, right, bottom),
+            "click_point": ctrl.get("click_point", ((left + right) // 2, (top + bottom) // 2)),
+        }
+        marker_num += 1
+
+    # ===== 第二轮：OCR 文字 → 橙色圆点（去重后） =====
+    uia_bboxes = [c["bbox"] for c in uia_controls]
+
+    # 关键词排序
     task_keywords = ModelClient._extract_keywords(task)
     sorted_results = sorted(
         ocr_results,
@@ -429,61 +535,100 @@ def annotate_screenshot(
         if not ModelClient._is_ocr_noise(item["text"], task)
     ]
 
-    # 加载字体
-    try:
-        font = ImageFont.truetype("arial.ttf", 14)
-    except (OSError, IOError):
-        try:
-            font = ImageFont.truetype("C:\\Windows\\Fonts\\arial.ttf", 14)
-        except (OSError, IOError):
-            font = ImageFont.load_default()
+    for item in filtered:
+        if marker_num > max_items:
+            break
 
-    marker_map = OrderedDict()
-    marker_num = 1
-
-    for item in filtered[:max_items]:
         text = item["text"]
         x1, y1, x2, y2 = item["bbox"]
+
+        # ---- 去重：OCR bbox 与任一 UIA bbox 重叠 > 阈值则跳过 ----
+        if _is_duplicate_with_uia((x1, y1, x2, y2), uia_bboxes):
+            continue
+
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
         text_h = y2 - y1
-        icon_y = max(0, y1 - text_h * 2)
-
-        # 在图标位置画圆点
-        # 标注点：文字上方偏移一半文字高度（约15-20px），适配桌面和开始菜单
         mx, my = cx, max(0, y1 - text_h)
 
-        # 白色外圈（让圆点在深色背景上也可见）
-        draw.ellipse(
-            [mx - DOT_RADIUS - 2, my - DOT_RADIUS - 2,
-             mx + DOT_RADIUS + 2, my + DOT_RADIUS + 2],
-            fill=None, outline=OUTLINE_COLOR, width=2,
+        # 白色外圈
+        r = OCR_DOT_RADIUS
+        main_draw.ellipse(
+            [mx - r - 2, my - r - 2, mx + r + 2, my + r + 2],
+            fill=None, outline=OCR_OUTLINE_COLOR, width=2,
         )
-        # 橙色填充圆
-        draw.ellipse(
-            [mx - DOT_RADIUS, my - DOT_RADIUS,
-             mx + DOT_RADIUS, my + DOT_RADIUS],
-            fill=DOT_COLOR, outline=DOT_COLOR,
+        # 橙色圆点
+        main_draw.ellipse(
+            [mx - r, my - r, mx + r, my + r],
+            fill=OCR_DOT_COLOR, outline=OCR_DOT_COLOR,
         )
-
-        # 编号文字（居中绘制在圆心）
+        # 编号
         num_str = str(marker_num)
-        text_w = len(num_str) * 8
-        text_h_est = 12
-        draw.text(
-            (mx - text_w // 2, my - text_h_est // 2),
-            num_str, fill=TEXT_COLOR, font=font,
+        tw_est = len(num_str) * 8
+        main_draw.text(
+            (mx - tw_est // 2, my - 6),
+            num_str, fill=(255, 255, 255), font=font,
         )
 
         marker_map[marker_num] = {
+            "source": "ocr",
             "text": text,
-            "icon": (mx, my),
-            "text_center": (cx, cy),
+            "control_type": None,
+            "bbox": (x1, y1, x2, y2),
+            "click_point": (mx, my),
         }
         marker_num += 1
 
-    logger.debug(
-        f"截图标注完成：{len(marker_map)} 个标记点 / "
-        f"OCR {len(filtered)} 个有效元素"
+    # 把半透明叠加层合并到主图
+    annotated = Image.alpha_composite(annotated.convert("RGBA"), overlay).convert("RGB")
+
+    logger.info(
+        f"截图标注完成：{len(marker_map)} 个标记 "
+        f"(UIA: {sum(1 for m in marker_map.values() if m['source'] == 'uia')}, "
+        f"OCR: {sum(1 for m in marker_map.values() if m['source'] == 'ocr')})"
     )
     return annotated, marker_map
+
+
+def _is_duplicate_with_uia(ocr_bbox: tuple, uia_bboxes: list) -> bool:
+    """判断 OCR 边界框是否与任一 UIA 边界框重叠，避免重复标注。
+
+    使用 IoU（交并比）衡量重叠程度。
+
+    Args:
+        ocr_bbox: OCR 边界框 (x1, y1, x2, y2)。
+        uia_bboxes: UIA 边界框列表。
+
+    Returns:
+        True 表示应跳过此 OCR 元素（已被 UIA 框覆盖）。
+    """
+    if not uia_bboxes:
+        return False
+
+    ox1, oy1, ox2, oy2 = ocr_bbox
+    o_area = max(0, ox2 - ox1) * max(0, oy2 - oy1)
+    if o_area <= 0:
+        return False
+
+    for ux1, uy1, ux2, uy2 in uia_bboxes:
+        # 计算交集
+        ix1 = max(ox1, ux1)
+        iy1 = max(oy1, uy1)
+        ix2 = min(ox2, ux2)
+        iy2 = min(oy2, uy2)
+        iw = max(0, ix2 - ix1)
+        ih = max(0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            continue
+
+        u_area = max(0, ux2 - ux1) * max(0, uy2 - uy1)
+        union = o_area + u_area - inter
+        if union <= 0:
+            continue
+
+        iou = inter / union
+        if iou > _UIA_OCR_IOU_THRESHOLD:
+            return True
+
+    return False
 

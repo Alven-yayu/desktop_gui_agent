@@ -106,18 +106,31 @@ class TaskManager:
         if action_type == "click_marker":
             marker = params["marker"]
             info = self._marker_map.get(marker, {})
-            x, y = info.get("icon", (None, None))
+            # 优先 click_point（新格式），回退 icon（旧格式兼容）
+            x, y = info.get("click_point") or info.get("icon", (None, None))
             if x is None:
-                logger.warning(f"标注 #{marker} 不存在，可用: {list(self._marker_map.keys())}")
+                keys = list(self._marker_map.keys())
+                logger.warning(f"标注 #{marker} 不存在，可用: {keys}")
                 return False
+            source = info.get("source", "?")
+            logger.info(
+                f"[UIA] click_marker(#{marker}) → ({x}, {y}) "
+                f"\"{info.get('text', '')}\" ({source})"
+            )
             return self.mouse.click(x, y)
         elif action_type == "double_click_marker":
             marker = params["marker"]
             info = self._marker_map.get(marker, {})
-            x, y = info.get("icon", (None, None))
+            x, y = info.get("click_point") or info.get("icon", (None, None))
             if x is None:
-                logger.warning(f"标注 #{marker} 不存在，可用: {list(self._marker_map.keys())}")
+                keys = list(self._marker_map.keys())
+                logger.warning(f"标注 #{marker} 不存在，可用: {keys}")
                 return False
+            source = info.get("source", "?")
+            logger.info(
+                f"[UIA] double_click_marker(#{marker}) → ({x}, {y}) "
+                f"\"{info.get('text', '')}\" ({source})"
+            )
             return self.mouse.double_click(x, y)
         elif action_type == "click":
             return self.mouse.click(params["x"], params["y"])
@@ -244,23 +257,47 @@ class TaskManager:
                     ocr_results = []
                 timings["ocr"] = time.time() - ocr_start
 
+                # 2.5 UIA 感知：获取前台窗口的原生 UI 控件树
+                # （Windows 标准应用可精确定位按钮/文本框，不用猜坐标）
+                from desktop_gui_agent.perception.uia_parser import UiaParser
+
+                uia_controls = []
+                try:
+                    uia_controls = UiaParser.get_foreground_controls()
+                except Exception as e:
+                    logger.debug(f"UIA 感知跳过: {e}")
+
                 # 3. 截图标注 + 模型推理
-                # 在截图上画出 OCR 检测到的每个元素位置（编号圆点），
-                # 模型看到标注图后可以直接视觉确认坐标，不再自己猜数字
+                # 融合标注：UIA 控件(绿色矩形框) + OCR 文字(橙色圆点)，
+                # 统一编号，模型只需选编号，代码查表翻译为精确坐标
                 from desktop_gui_agent.perception.screenshot import annotate_screenshot
 
                 annotated_image, marker_map = annotate_screenshot(
-                    image, ocr_results, max_items=15, task=task,
+                    image, ocr_results, max_items=20, task=task,
+                    uia_controls=uia_controls,
                 )
                 self._marker_map = marker_map  # 保存供 _dispatch 翻译编号
-                # 构建标注文字说明
+                # 构建标注文字说明（区分 UIA 矩形框和 OCR 圆点）
+                def _build_marker_line(num: int, info: dict) -> str:
+                    """构建单个标注的文字说明行。"""
+                    source = info.get("source", "?")
+                    text = info.get("text", "")
+                    cp = info.get("click_point", (0, 0))
+                    if source == "uia":
+                        ctrl_type = info.get("control_type", "")
+                        return f"  #{num}[{ctrl_type}]: \"{text}\" ({cp[0]},{cp[1]})"
+                    else:
+                        return f"  #{num}[文字]: \"{text}\" ({cp[0]},{cp[1]})"
+
                 marker_text_lines = [
-                    f"  #{num}: \"{info['text']}\" 图标({info['icon'][0]},{info['icon'][1]})"
+                    _build_marker_line(num, info)
                     for num, info in marker_map.items()
                 ]
                 marker_extra = (
-                    "【屏幕标注说明】截图上橙色圆点旁的编号对应下方列表，"
-                    "请观察标注点在图中的实际位置来确认目标：\n"
+                    "【屏幕标注说明】\n"
+                    "  绿色矩形框 = Windows 应用按钮/控件（来自 UIA）\n"
+                    "  橙色圆点 = 非标准 UI 文字（来自 OCR）\n"
+                    "  请观察标注在图中的实际位置，用编号指定目标：\n"
                     + "\n".join(marker_text_lines)
                 ) if marker_text_lines else ""
 

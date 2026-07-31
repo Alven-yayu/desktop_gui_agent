@@ -142,7 +142,7 @@ class KeyboardController:
             return True
 
         try:
-            if not self._is_ascii(text):
+            if self._needs_clipboard(text):
                 self._type_via_clipboard(text)
             else:
                 self._type_ascii(text)

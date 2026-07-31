@@ -141,16 +141,16 @@ PROMPT_SYSTEM = """你是桌面GUI智能体。看截图、判断状态、输出�
 - finish(result="<str>")       任务完成
 
 【核心规则——必须遵守】
-1. 点目标用 click_marker(N) / double_click_marker(N)，N=截图橙色圆点编号
-2. 桌面图标用 double_click_marker，其他用 click_marker
-3. **打开开始菜单永远用 hotkey(win)，禁止点击开始按钮！开始按钮太小容易点偏**
-4. 没有标注点对应目标 → 用键盘（hotkey / type），不准猜坐标
-5. 上一步没效果立刻换方法
-6. 计算器任务流程：type("算式") → hotkey(enter) → finish
-   **不要看计算器显示什么来判断——输完直接按Enter就行！**
-   计算器显示"1"不代表只输了1，运算符后的数字还没显示而已
-7. 打开软件：桌面标注点 > hotkey(win)+type+enter > hotkey(win,e)
-8. 任务完成输出 finish"""
+1. **打开软件永远用键盘：hotkey(win) → type(软件名) → hotkey(enter)**
+   禁止在开始菜单里靠视觉猜图标！OCR不区分图标长相，容易点错
+   桌面图标才用 double_click_marker（桌面图标有唯一文字对应）
+2. 软件已打开后，用 click_marker(N) 点击应用内部的按钮/控件
+   （UIA绿框=Windows应用按钮，OCR橙点=非标准UI元素）
+3. 打开开始菜单用 hotkey(win)，禁止点击开始按钮
+4. 没有标注点对应目标 → 用键盘，不准猜坐标
+5. 上一步没效果立刻换方法，不要重复
+6. 计算器任务流程：打开计算器后 type("算式") → hotkey(enter) → finish
+   **不要看计算器显示——输完直接按Enter！**"""
 
 
 PROMPT_USER_TEMPLATE = """用户任务：{task}
