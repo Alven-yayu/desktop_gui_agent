@@ -279,7 +279,6 @@ class TaskManager:
                 self._marker_map = marker_map  # 保存供 _dispatch 翻译编号
                 # 构建标注文字说明（区分 UIA 矩形框和 OCR 圆点）
                 def _build_marker_line(num: int, info: dict) -> str:
-                    """构建单个标注的文字说明行。"""
                     source = info.get("source", "?")
                     text = info.get("text", "")
                     cp = info.get("click_point", (0, 0))
@@ -293,7 +292,20 @@ class TaskManager:
                     _build_marker_line(num, info)
                     for num, info in marker_map.items()
                 ]
+
+                # 获取当前前台窗口标题，帮助模型判断"现在在哪个应用里"
+                fg_window_title = ""
+                try:
+                    import ctypes
+                    hwnd = ctypes.windll.user32.GetForegroundWindow()
+                    buf = ctypes.create_unicode_buffer(256)
+                    ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+                    fg_window_title = buf.value
+                except Exception:
+                    pass
+
                 marker_extra = (
+                    f"【当前前台窗口】{fg_window_title}\n"
                     "【屏幕标注说明】\n"
                     "  绿色矩形框 = Windows 应用按钮/控件（来自 UIA）\n"
                     "  橙色圆点 = 非标准 UI 文字（来自 OCR）\n"

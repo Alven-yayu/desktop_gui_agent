@@ -321,7 +321,7 @@ class ModelClient:
         prompt = _config.PROMPT_USER_TEMPLATE.format(task=task)
 
         if cot_enabled and _config.PROMPT_COT_ENABLED:
-            prompt += "\n请按格式输出：观察 → 分析 → 动作，三行。"
+            prompt += "\n请严格按格式输出：先写 Thought 说明判断依据，再写 动作。"
 
         if context:
             history = "\n".join(

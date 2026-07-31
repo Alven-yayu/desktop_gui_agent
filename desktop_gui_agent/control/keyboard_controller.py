@@ -142,10 +142,8 @@ class KeyboardController:
             return True
 
         try:
-            if self._needs_clipboard(text):
-                self._type_via_clipboard(text)
-            else:
-                self._type_ascii(text)
+            # 一律走剪贴板粘贴，避免 pynput 逐字符输入在中文键盘布局下丢字符
+            self._type_via_clipboard(text)
             logger.debug(f"文本输入成功，长度={len(text)}")
             return True
         except Exception as e:

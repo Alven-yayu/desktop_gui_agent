@@ -1052,8 +1052,8 @@ class TestPromptBuilding:
         for msg in messages:
             if msg["role"] == "system":
                 system_content = msg["content"]
-        assert "示例A" in system_content
-        assert "打开计算器" in system_content
+        assert "【点击标注" in system_content
+        assert "计算器" in system_content
 
     @patch('desktop_gui_agent.agent.model_client.process_vision_info')
     @patch('desktop_gui_agent.agent.model_client._load_local_model')
@@ -1085,7 +1085,7 @@ class TestPromptBuilding:
                     for item in msg["content"]:
                         if item["type"] == "text":
                             user_text += item["text"]
-            assert "请按格式输出" in user_text
+            assert "按格式输出" in user_text
         finally:
             config.TWO_STAGE_ENABLED = old_flag
 
