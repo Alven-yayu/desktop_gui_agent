@@ -429,9 +429,24 @@ class TaskManager:
                 # 统一编号，模型只需选编号，代码查表翻译为精确坐标
                 from desktop_gui_agent.perception.screenshot import annotate_screenshot
 
+                # 先取前台窗口标题（标注需要判断是否在桌面，也让模型知道当前应用）
+                fg_window_title = ""
+                try:
+                    import ctypes
+                    hwnd = ctypes.windll.user32.GetForegroundWindow()
+                    buf = ctypes.create_unicode_buffer(256)
+                    ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+                    fg_window_title = buf.value
+                except Exception:
+                    pass
+
+                # 桌面判断：前台窗口无标题说明当前在桌面（没有应用窗口）。
+                # 桌面上 OCR 点击点需上偏以落在图标上；应用内取文字中心。
+                is_desktop = not bool(fg_window_title.strip())
+
                 annotated_image, marker_map = annotate_screenshot(
                     image, ocr_results, max_items=20, task=task,
-                    uia_controls=uia_controls,
+                    uia_controls=uia_controls, is_desktop=is_desktop,
                 )
                 self._marker_map = marker_map  # 保存供 _dispatch 翻译编号
                 # 构建标注文字说明（区分 UIA 矩形框和 OCR 圆点）
@@ -449,17 +464,6 @@ class TaskManager:
                     _build_marker_line(num, info)
                     for num, info in marker_map.items()
                 ]
-
-                # 获取当前前台窗口标题，帮助模型判断"现在在哪个应用里"
-                fg_window_title = ""
-                try:
-                    import ctypes
-                    hwnd = ctypes.windll.user32.GetForegroundWindow()
-                    buf = ctypes.create_unicode_buffer(256)
-                    ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
-                    fg_window_title = buf.value
-                except Exception:
-                    pass
 
                 # 验证-纠正：连续无变化时，在下一次模型查询前注入恢复提示
                 recovery_hint = ""

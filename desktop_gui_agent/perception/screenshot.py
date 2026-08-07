@@ -394,6 +394,7 @@ def annotate_screenshot(
     max_items: int = 20,
     task: str = "",
     uia_controls: list = None,
+    is_desktop: bool = False,
 ) -> tuple:
     """在截图上标注可交互元素，返回标注图和编号→坐标映射表。
 
@@ -409,6 +410,10 @@ def annotate_screenshot(
         task: 任务文本，用于 OCR 关键词排序。
         uia_controls: UIA 控件列表，每项含 {"name", "control_type", "bbox": (l,t,r,b)}。
                       None 或空列表表示无 UIA 数据（纯 OCR 模式）。
+        is_desktop: 当前是否处于桌面（无应用窗口前台）。
+                    True 时 OCR 点击点向上偏移一个文字高度以落在图标上
+                    （桌面图标在文字上方，双击图标才能打开应用，点文字会进重命名模式）；
+                    False（应用窗口内）时点击点取文字中心，用于菜单项/列表项等。
 
     Returns:
         (annotated_image, marker_map)
@@ -547,8 +552,15 @@ def annotate_screenshot(
             continue
 
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-        text_h = y2 - y1
-        mx, my = cx, max(0, y1 - text_h)
+        if is_desktop:
+            # 桌面图标：图标在文字上方，点击需落在图标上（双击打开应用）。
+            # 若点文字本身会进入重命名模式，因此点击点向上偏移一个文字高度。
+            text_h = y2 - y1
+            mx, my = cx, max(0, y1 - text_h)
+        else:
+            # 应用窗口内：文字本身就是要点击的目标（菜单项/列表项/对话框按钮），
+            # 点击点取文字中心，避免偏移导致点空。
+            mx, my = cx, cy
 
         # 白色外圈
         r = OCR_DOT_RADIUS

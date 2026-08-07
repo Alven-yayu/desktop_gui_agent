@@ -143,3 +143,47 @@ class TestMinimizeConsole:
                    return_value=False):
             result = minimize_console()
             assert isinstance(result, bool)  # 不崩溃即可，True 或 False 都行
+
+
+# ===== annotate_screenshot OCR 点击点测试 =====
+
+class TestAnnotateOcrClickPoint:
+    """annotate_screenshot 的 OCR 点击点定位测试。
+
+    设计意图：桌面图标在文字上方，点击需落在图标上（双击打开），
+    点文字会进重命名模式 → 桌面场景点击点向上偏移一个文字高度；
+    应用窗口内文字本身就是要点击的目标（菜单项/列表项）→ 取文字中心。
+    """
+
+    def _annotate_ocr(self, is_desktop=False, text="确定",
+                      bbox=(100, 50, 200, 80)):
+        """辅助：用单条 OCR 结果跑 annotate_screenshot，返回 marker_map。"""
+        from desktop_gui_agent.perception.screenshot import annotate_screenshot
+        img = Image.new("RGB", (800, 600), color=(255, 255, 255))
+        ocr = [{"text": text, "bbox": bbox, "confidence": 0.9}]
+        _, marker_map = annotate_screenshot(
+            img, ocr, task="测试", uia_controls=[], is_desktop=is_desktop,
+        )
+        return marker_map
+
+    def test_ocr_click_point_is_text_center_in_app(self):
+        """应用窗口内：OCR 点击点应为文字中心 (150, 65)"""
+        marker_map = self._annotate_ocr(is_desktop=False)
+        assert marker_map[1]["click_point"] == (150, 65)
+
+    def test_ocr_click_point_not_above_text_in_app(self):
+        """应用窗口内：点击点不应再是文字上方 (150, 20)"""
+        marker_map = self._annotate_ocr(is_desktop=False)
+        assert marker_map[1]["click_point"] != (150, 20)
+
+    def test_ocr_click_point_offset_on_desktop(self):
+        """桌面：OCR 点击点应上偏一个文字高度，落在图标上 (150, 20)"""
+        marker_map = self._annotate_ocr(is_desktop=True)
+        # 文字高度 = 80-50 = 30，文字顶 y=50，上偏后 y = max(0, 50-30) = 20
+        assert marker_map[1]["click_point"] == (150, 20)
+
+    def test_ocr_click_point_desktop_preserves_icon_intent(self):
+        """桌面：点击点的 y 应显著小于文字中心 y，指向图标而非文字"""
+        marker_map = self._annotate_ocr(is_desktop=True)
+        cp = marker_map[1]["click_point"]
+        assert cp[1] < 65  # 文字中心 y=65，上偏后必须在其上方
