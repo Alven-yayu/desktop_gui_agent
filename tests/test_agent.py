@@ -1517,6 +1517,14 @@ class TestPromptBuilding:
         assert "hotkey(ctrl, l)" in joined         # 保存对话框
         assert "press(key=\"tab\")" in joined      # 单键切换焦点
 
+    def test_prompt_has_keyboard_first_principle(self):
+        """PROMPT 应包含键盘优先原则（模型最可靠的路径）"""
+        import desktop_gui_agent.config as config
+        assert "键盘优先" in config.PROMPT_SYSTEM
+        assert "hotkey(win)→type" in config.PROMPT_SYSTEM or "hotkey(win)" in config.PROMPT_SYSTEM
+        assert "hotkey(alt, f4)" in config.PROMPT_SYSTEM  # 关闭窗口
+        assert "click_marker" in config.PROMPT_SYSTEM     # 鼠标用于大按钮
+
     @patch('desktop_gui_agent.agent.model_client.process_vision_info')
     @patch('desktop_gui_agent.agent.model_client._load_local_model')
     def test_cot_guidance_in_user_prompt(self, mock_load, mock_pvi):
