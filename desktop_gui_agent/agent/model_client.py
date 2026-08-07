@@ -369,7 +369,12 @@ class ModelClient:
         if image is None:
             raise ModelError("输入截图不能为 None")
 
-        image = self._resize_image(image)
+        # 图片缩放：API 模型视野更强，用更大图避免标注编号缩小看不清；
+        # 本地 2B 模型用默认 896px 防 OOM。
+        max_size = (
+            _config.MODEL_API_IMAGE_MAX_SIZE if self.mode == "api" else self._MAX_IMAGE_SIZE
+        )
+        image = self._resize_image(image, max_size=max_size)
 
         # 尝试双层架构
         if _config.TWO_STAGE_ENABLED:

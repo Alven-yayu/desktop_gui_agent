@@ -129,6 +129,19 @@ VERIFY_CORRECT_ENABLED = True       # 是否启用验证-纠正循环：每步�
 VERIFY_CORRECT_MAX_NO_CHANGE = 2    # 连续无变化步数阈值，超限后注入恢复提示
 VERIFY_CORRECT_WAIT = 0.3           # 动作执行后等待UI稳定的时间（秒）
 
+# ===== 截图标注配置 =====
+ANNOTATE_MAX_ITEMS = 30  # 每步最多标注的元素数量（UIA 绿框 + OCR 橙点总和）。
+                         # 复杂界面（Office 工具栏/文件管理器）元素多，20 不够用。
+
+# ===== 历史上下文配置 =====
+HISTORY_MAX_ITEMS = 8  # 传给模型的历史动作条数上限。
+                       # 长任务上下文会随步数无限膨胀，截断到最近 N 步控制 token 量。
+
+# ===== API 模式图片配置 =====
+MODEL_API_IMAGE_MAX_SIZE = 1280  # API 模式截图缩放最大边长（像素）。
+                                 # 本地 2B 用 896px 防 OOM；API 模型视野更强，
+                                 # 用更大图避免标注编号缩小看不清。
+
 # ===== 性能计时配置 =====
 PERF_TIMING_ENABLED = True          # 是否在每步日志中输出各环节耗时
 

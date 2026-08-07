@@ -18,7 +18,7 @@ from desktop_gui_agent.agent.model_client import ModelClient
 from desktop_gui_agent.config import (
     AGENT_MAX_STEPS, AGENT_MAX_CONSECUTIVE_ERRORS, AGENT_STEP_DELAY,
     VERIFY_CORRECT_ENABLED, VERIFY_CORRECT_MAX_NO_CHANGE, VERIFY_CORRECT_WAIT,
-    PERF_TIMING_ENABLED,
+    PERF_TIMING_ENABLED, ANNOTATE_MAX_ITEMS, HISTORY_MAX_ITEMS,
 )
 from desktop_gui_agent.control.keyboard_controller import KeyboardController
 from desktop_gui_agent.control.mouse_controller import MouseController
@@ -277,6 +277,19 @@ class TaskManager:
         return state
 
     @staticmethod
+    def _build_history_actions(history: list) -> list:
+        """提取最近 N 步动作原文，防止长任务上下文随步数无限膨胀。
+
+        Args:
+            history: 步骤历史记录列表，每项含 "action_raw" 字段。
+
+        Returns:
+            最近 HISTORY_MAX_ITEMS 条动作原文列表。
+        """
+        actions = [h["action_raw"] for h in history if "action_raw" in h]
+        return actions[-HISTORY_MAX_ITEMS:]
+
+    @staticmethod
     def _has_state_changed(before: dict, after: dict) -> bool:
         """对比前后状态快照，判断是否有实质性变化。
 
@@ -445,7 +458,7 @@ class TaskManager:
                 is_desktop = not bool(fg_window_title.strip())
 
                 annotated_image, marker_map = annotate_screenshot(
-                    image, ocr_results, max_items=20, task=task,
+                    image, ocr_results, max_items=ANNOTATE_MAX_ITEMS, task=task,
                     uia_controls=uia_controls, is_desktop=is_desktop,
                 )
                 self._marker_map = marker_map  # 保存供 _dispatch 翻译编号
@@ -501,7 +514,7 @@ class TaskManager:
                 ) if marker_text_lines else recovery_hint if recovery_hint else ""
 
                 model_start = time.time()
-                history_actions = [h["action_raw"] for h in history if "action_raw" in h]
+                history_actions = self._build_history_actions(history)
                 try:
                     model_output = self.model_client.query(
                         annotated_image, task, context=history_actions,

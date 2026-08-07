@@ -18,7 +18,7 @@ from typing import List, Optional, Tuple
 import mss
 from PIL import Image
 
-from desktop_gui_agent.config import SCREEN_ID, SCREENSHOT_REGION
+from desktop_gui_agent.config import ANNOTATE_MAX_ITEMS, SCREEN_ID, SCREENSHOT_REGION
 from desktop_gui_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -391,7 +391,7 @@ _UIA_OCR_IOU_THRESHOLD = 0.2
 def annotate_screenshot(
     image: Image.Image,
     ocr_results: list,
-    max_items: int = 20,
+    max_items: int = ANNOTATE_MAX_ITEMS,
     task: str = "",
     uia_controls: list = None,
     is_desktop: bool = False,

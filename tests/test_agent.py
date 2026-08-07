@@ -742,6 +742,43 @@ class TestTaskManagerDispatch:
         mock_mouse.drag_from_to.assert_not_called()
 
 
+class TestBuildHistoryActions:
+    """TaskManager._build_history_actions 历史截断测试"""
+
+    def test_history_truncated_to_last_n(self):
+        """超过 HISTORY_MAX_ITEMS 条时只保留最近 N 条"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        history = [
+            {"step": i, "action_raw": f"动作{i}"}
+            for i in range(12)
+        ]
+        result = TaskManager._build_history_actions(history)
+        assert len(result) == 8  # HISTORY_MAX_ITEMS
+        assert result[0] == "动作4"   # 只保留最后 8 条
+        assert result[-1] == "动作11"
+
+    def test_history_short_not_truncated(self):
+        """不足 HISTORY_MAX_ITEMS 条时原样返回"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        history = [{"step": i, "action_raw": f"动作{i}"} for i in range(3)]
+        result = TaskManager._build_history_actions(history)
+        assert len(result) == 3
+
+    def test_history_ignores_entries_without_action_raw(self):
+        """没有 action_raw 字段的历史项被跳过"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        history = [
+            {"step": 0},
+            {"step": 1, "action_raw": "动作1"},
+            {"step": 2},
+        ]
+        result = TaskManager._build_history_actions(history)
+        assert result == ["动作1"]
+
+
 class TestTaskManagerRun:
     """TaskManager.run() 主循环测试"""
 
