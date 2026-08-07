@@ -365,6 +365,63 @@ class TaskManager:
                (top - margin) <= cy <= (bottom + margin)
 
     @staticmethod
+    def _expand_rect(rect: tuple, margin: int, image_size: tuple) -> Optional[tuple]:
+        """把窗口矩形外扩 margin 像素，并裁剪到图片边界内。
+
+        Args:
+            rect: (left, top, right, bottom)。
+            margin: 外扩像素，避免裁掉窗口边缘控件。
+            image_size: (width, height)，用于边界裁剪。
+
+        Returns:
+            外扩并夹紧后的矩形；窗口与图片无有效重叠时返回 None
+            （例如 mock 小图 + 真实大窗口，裁剪无意义）。
+        """
+        left, top, right, bottom = rect
+        w, h = image_size
+        new_left = max(0, left - margin)
+        new_top = max(0, top - margin)
+        new_right = min(w, right + margin)
+        new_bottom = min(h, bottom + margin)
+        if new_right <= new_left or new_bottom <= new_top:
+            return None
+        return (new_left, new_top, new_right, new_bottom)
+
+    @staticmethod
+    def _translate_ctrl(ctrl: dict, offset_x: int, offset_y: int) -> dict:
+        """把 UIA 控件的 bbox/click_point 平移到裁剪图坐标系。
+
+        裁剪窗口后，控件坐标从屏幕坐标变为裁剪图局部坐标，
+        标注时才能画到正确位置。
+
+        Args:
+            ctrl: UIA 控件字典（含 bbox、click_point）。
+            offset_x, offset_y: 裁剪矩形左上角的屏幕坐标。
+
+        Returns:
+            平移后的控件字典副本。
+        """
+        new = dict(ctrl)
+        bbox = ctrl.get("bbox")
+        if bbox:
+            x1, y1, x2, y2 = bbox
+            new["bbox"] = (x1 - offset_x, y1 - offset_y, x2 - offset_x, y2 - offset_y)
+        cp = ctrl.get("click_point")
+        if cp:
+            new["click_point"] = (cp[0] - offset_x, cp[1] - offset_y)
+        return new
+
+    @staticmethod
+    def _translate_ocr(item: dict, offset_x: int, offset_y: int) -> dict:
+        """把 OCR 结果项平移到裁剪图坐标系（用于裁剪后重新标注）。"""
+        new = dict(item)
+        bbox = item.get("bbox")
+        if bbox:
+            x1, y1, x2, y2 = bbox
+            new["bbox"] = (x1 - offset_x, y1 - offset_y, x2 - offset_x, y2 - offset_y)
+        return new
+
+    @staticmethod
     def _screen_pixel_diff(img_before, img_after, sample: int = 64) -> float:
         """计算两张截图缩小后的像素差异比例 (0~1)。
 
@@ -564,10 +621,43 @@ class TaskManager:
                 # 桌面上 OCR 点击点需上偏以落在图标上；应用内取文字中心。
                 is_desktop = not bool(fg_window_title.strip())
 
-                annotated_image, marker_map = annotate_screenshot(
-                    image, ocr_results, max_items=ANNOTATE_MAX_ITEMS, task=task,
-                    uia_controls=uia_controls, is_desktop=is_desktop,
-                )
+                # 获取前台窗口矩形：把标注聚焦到窗口区域。
+                # 完整桌面标注时，小窗口按钮的编号是稀疏大号（如28、29），
+                # 且可能超出 max_items 上限而没被标注。先裁剪窗口再标注，
+                # 按钮就能获得 1、2、3… 密集清晰编号，模型读得准。
+                fg_rect = None
+                if not is_desktop:
+                    fg_rect = self._get_foreground_window_rect()
+                    if fg_rect:
+                        fg_rect = self._expand_rect(
+                            fg_rect, margin=40, image_size=image.size
+                        )
+
+                if fg_rect:
+                    # 裁剪原始截图到窗口，并平移 UIA/OCR 坐标到裁剪图坐标系
+                    crop_img = image.crop(fg_rect)
+                    offset_x, offset_y = fg_rect[0], fg_rect[1]
+                    uia_local = [
+                        self._translate_ctrl(c, offset_x, offset_y)
+                        for c in uia_controls
+                    ]
+                    ocr_local = [
+                        self._translate_ocr(o, offset_x, offset_y)
+                        for o in ocr_results
+                    ]
+                    annotated_image, marker_map = annotate_screenshot(
+                        crop_img, ocr_local, max_items=ANNOTATE_MAX_ITEMS,
+                        task=task, uia_controls=uia_local, is_desktop=False,
+                    )
+                    # 点击坐标转回屏幕坐标（_dispatch 直接用屏幕坐标点击）
+                    for info in marker_map.values():
+                        cx, cy = info["click_point"]
+                        info["click_point"] = (cx + offset_x, cy + offset_y)
+                else:
+                    annotated_image, marker_map = annotate_screenshot(
+                        image, ocr_results, max_items=ANNOTATE_MAX_ITEMS, task=task,
+                        uia_controls=uia_controls, is_desktop=is_desktop,
+                    )
                 self._marker_map = marker_map  # 保存供 _dispatch 翻译编号
                 # 构建标注文字说明（区分 UIA 矩形框和 OCR 圆点）
                 def _build_marker_line(num: int, info: dict) -> str:
@@ -584,23 +674,6 @@ class TaskManager:
                     _build_marker_line(num, info)
                     for num, info in marker_map.items()
                 ]
-
-                # 放大到前台窗口：完整截图中应用窗口太小，标注编号模型读不清。
-                # 裁剪标注图到窗口区域，并只保留窗口内标注的说明文字。
-                # 注意：marker_map 的 click_point 仍是屏幕绝对坐标，编号映射不变。
-                fg_rect = None
-                if not is_desktop:
-                    fg_rect = self._get_foreground_window_rect()
-                if fg_rect:
-                    annotated_image = self._crop_image(annotated_image, fg_rect)
-                    in_window = [
-                        num for num, info in marker_map.items()
-                        if self._bbox_in_rect(info.get("bbox"), fg_rect)
-                    ]
-                    marker_text_lines = [
-                        _build_marker_line(num, marker_map[num])
-                        for num in in_window
-                    ]
 
                 # 验证-纠正：连续无变化时，在下一次模型查询前注入恢复提示
                 recovery_hint = ""

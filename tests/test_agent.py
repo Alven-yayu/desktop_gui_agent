@@ -826,6 +826,44 @@ class TestTaskManagerPerceptionHelpers:
         cropped = TaskManager._crop_image(img, (0, 0, 30, 30), margin=0)
         assert cropped is img
 
+    def test_expand_rect_expands_with_margin(self):
+        """窗口矩形外扩 margin"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        rect = (100, 100, 500, 400)
+        expanded = TaskManager._expand_rect(rect, margin=40, image_size=(1000, 800))
+        assert expanded == (60, 60, 540, 440)
+
+    def test_expand_rect_clamps_to_image_bounds(self):
+        """外扩后超出图片边界时夹紧到边界内"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        rect = (0, 0, 100, 100)
+        expanded = TaskManager._expand_rect(rect, margin=40, image_size=(100, 100))
+        assert expanded == (0, 0, 100, 100)
+
+    def test_expand_rect_no_overlap_returns_none(self):
+        """窗口与图片无有效重叠（窗口完全在图外）时返回 None"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        rect = (1000, 1000, 2000, 2000)  # 完全在 100x100 图外
+        expanded = TaskManager._expand_rect(rect, margin=40, image_size=(100, 100))
+        assert expanded is None
+
+    def test_translate_ctrl_shifts_coords(self):
+        """UIA 控件 bbox/click_point 平移到裁剪图坐标系，其他字段保留"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        ctrl = {"bbox": (100, 100, 200, 150), "click_point": (150, 125), "name": "x"}
+        out = TaskManager._translate_ctrl(ctrl, 100, 100)
+        assert out["bbox"] == (0, 0, 100, 50)
+        assert out["click_point"] == (50, 25)
+        assert out["name"] == "x"
+
+    def test_translate_ocr_shifts_bbox(self):
+        """OCR 结果 bbox 平移到裁剪图坐标系"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        item = {"text": "hi", "bbox": (200, 300, 300, 330), "confidence": 0.9}
+        out = TaskManager._translate_ocr(item, 100, 200)
+        assert out["bbox"] == (100, 100, 200, 130)
+        assert out["text"] == "hi"
+
     def test_pixel_diff_identical_images_zero(self):
         """相同图片差异为 0"""
         from PIL import Image
