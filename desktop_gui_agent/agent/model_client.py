@@ -649,6 +649,7 @@ class ModelClient:
                 },
             ],
             "max_tokens": max_tokens,
+            "temperature": _config.MODEL_API_TEMPERATURE,
         }
 
         # 重试逻辑：最多 2 次
