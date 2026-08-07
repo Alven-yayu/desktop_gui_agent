@@ -817,6 +817,16 @@ class TestTaskManagerDispatch:
             mock_uia.set_control_value.assert_not_called()
         assert result is False
 
+    def test_resolve_marker_sets_bad_marker_hint(self):
+        """解析不存在的标注编号应记录纠正提示（打破幻觉循环）"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        tm = TaskManager()
+        tm._marker_map = {1: {"click_point": (10, 20)}}
+        result = tm._resolve_marker(99)
+        assert result is None
+        assert "99" in tm._bad_marker_hint
+        assert "打开应用" in tm._bad_marker_hint
+
 
 class TestBuildHistoryActions:
     """TaskManager._build_history_actions 历史截断测试"""

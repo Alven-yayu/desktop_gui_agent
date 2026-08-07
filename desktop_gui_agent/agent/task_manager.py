@@ -74,6 +74,7 @@ class TaskManager:
         self.keyboard = keyboard
         self.model_client = model_client
         self._marker_map: dict = {}  # 标注编号 → 坐标映射
+        self._bad_marker_hint = ""  # 上一步模型输出无效标注编号时的纠正提示
         logger.info(
             f"TaskManager 初始化，max_steps={max_steps}，"
             f"max_consecutive_errors={max_consecutive_errors}"
@@ -112,7 +113,14 @@ class TaskManager:
         x, y = info.get("click_point") or info.get("icon", (None, None))
         if x is None:
             keys = list(self._marker_map.keys())
+            max_num = max(keys) if keys else 0
             logger.warning(f"标注 #{marker} 不存在，可用: {keys}")
+            # 记录无效编号，下一步注入针对性纠正提示（打破模型幻觉循环）
+            self._bad_marker_hint = (
+                f"【!!! 纠正 — 标注编号无效 !!!】\n"
+                f"你上一步输出的标注编号 #{marker} 不存在！标注编号只有 1~{max_num}。\n"
+                f"不要输出无效编号。若任务是打开应用，请用搜索：hotkey(win)→type→hotkey(enter)。\n\n"
+            )
             return None
         return int(x), int(y)
 
@@ -735,7 +743,12 @@ class TaskManager:
                 except Exception:
                     path_line = ""
 
+                # 上一步模型输出了无效标注编号 → 注入针对性纠正提示
+                bad_marker_hint = self._bad_marker_hint
+                self._bad_marker_hint = ""  # 用后重置，避免重复
+
                 marker_extra = (
+                    bad_marker_hint +
                     recovery_hint +
                     cursor_line +
                     path_line +
