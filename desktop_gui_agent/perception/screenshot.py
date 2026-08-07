@@ -206,8 +206,29 @@ def _get_parent_pid(pid: int):
     return None
 
 
+# 已知终端窗口类：Windows Terminal、经典控制台。
+# 按类名匹配能覆盖"进程祖先链之外"的终端（如从 Claude Code 会话运行时，
+# 其终端窗口属于 WindowsTerminal.exe，可能不在 agent 的祖先 PID 链里）。
+_TERMINAL_WINDOW_CLASSES = (
+    "CASCADIA_HOSTING_WINDOW_CLASS",  # Windows Terminal
+    "ConsoleWindowClass",            # cmd / PowerShell 经典控制台
+    "WTWindow",                      # Windows Terminal 旧类名
+)
+
+
+def _is_terminal_window(hwnd) -> bool:
+    """判断窗口是否属于已知终端类（Windows Terminal / 经典控制台）。"""
+    try:
+        class_name = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetClassNameW(hwnd, class_name, 256)
+        return class_name.value in _TERMINAL_WINDOW_CLASSES
+    except Exception:
+        return False
+
+
 def _minimize_windows_by_pids(pids: List[int]) -> int:
-    """枚举所有顶层可见窗口，最小化属于指定 PID 列表的窗口。
+    """枚举所有顶层可见窗口，最小化属于指定 PID 列表的窗口，
+    以及所有终端类窗口（不依赖 PID 祖先链，覆盖 Claude Code 终端）。
 
     Args:
         pids: 进程 PID 列表。
@@ -226,7 +247,9 @@ def _minimize_windows_by_pids(pids: List[int]) -> int:
         ctypes.windll.user32.GetWindowThreadProcessId(
             hwnd, ctypes.byref(process_id)
         )
-        if process_id.value in pids_set:
+        is_own_or_ancestor = process_id.value in pids_set
+        is_terminal = _is_terminal_window(hwnd)
+        if is_own_or_ancestor or is_terminal:
             # 跳过太小的窗口（托盘图标等）
             rect = wintypes.RECT()
             ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))

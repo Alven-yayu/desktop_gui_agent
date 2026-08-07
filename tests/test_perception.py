@@ -144,6 +144,30 @@ class TestMinimizeConsole:
             result = minimize_console()
             assert isinstance(result, bool)  # 不崩溃即可，True 或 False 都行
 
+    def test_is_terminal_window_recognizes_windows_terminal(self):
+        """Windows Terminal 类名应被识别为终端窗口"""
+        from unittest.mock import patch
+        from desktop_gui_agent.perception.screenshot import _is_terminal_window
+
+        def fake_getclass(hwnd, buf, size):
+            buf.value = "CASCADIA_HOSTING_WINDOW_CLASS"
+            return len(buf.value)
+
+        with patch("ctypes.windll.user32.GetClassNameW", side_effect=fake_getclass):
+            assert _is_terminal_window(1) is True
+
+    def test_is_terminal_window_rejects_normal_window(self):
+        """普通应用窗口类名不应被识别为终端"""
+        from unittest.mock import patch
+        from desktop_gui_agent.perception.screenshot import _is_terminal_window
+
+        def fake_getclass(hwnd, buf, size):
+            buf.value = "Notepad"
+            return len(buf.value)
+
+        with patch("ctypes.windll.user32.GetClassNameW", side_effect=fake_getclass):
+            assert _is_terminal_window(1) is False
+
 
 # ===== annotate_screenshot OCR 点击点测试 =====
 
