@@ -18,6 +18,7 @@ from desktop_gui_agent.agent.model_client import ModelClient
 from desktop_gui_agent.config import (
     AGENT_MAX_STEPS, AGENT_MAX_CONSECUTIVE_ERRORS, AGENT_STEP_DELAY,
     VERIFY_CORRECT_ENABLED, VERIFY_CORRECT_MAX_NO_CHANGE, VERIFY_CORRECT_WAIT,
+    VERIFY_PIXEL_THRESHOLD,
     PERF_TIMING_ENABLED, ANNOTATE_MAX_ITEMS, HISTORY_MAX_ITEMS,
 )
 from desktop_gui_agent.control.keyboard_controller import KeyboardController
@@ -290,6 +291,112 @@ class TaskManager:
         return actions[-HISTORY_MAX_ITEMS:]
 
     @staticmethod
+    def _get_foreground_window_rect() -> Optional[tuple]:
+        """获取前台窗口的屏幕矩形 (left, top, right, bottom)。
+
+        用于把标注截图放大到前台窗口区域：完整桌面截图中应用窗口很小，
+        标注编号缩放后模型读不清。裁剪后窗口填满图片，编号清晰。
+
+        Returns:
+            (left, top, right, bottom) 屏幕绝对坐标；
+            无法获取或窗口不适合裁剪（桌面/全屏/过小）时返回 None。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                return None
+            rect = wintypes.RECT()
+            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = rect.right - rect.left
+            h = rect.bottom - rect.top
+            if w < 200 or h < 200:
+                return None  # 窗口太小，裁剪无意义
+            sw = ctypes.windll.user32.GetSystemMetrics(0)
+            sh = ctypes.windll.user32.GetSystemMetrics(1)
+            if w >= sw * 0.95 and h >= sh * 0.95:
+                return None  # 全屏窗口 ≈ 桌面，不裁剪（保留任务栏等上下文）
+            return (rect.left, rect.top, rect.right, rect.bottom)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _crop_image(image: Image.Image, rect: tuple, margin: int = 40) -> Image.Image:
+        """把图片裁剪到指定矩形区域，外扩 margin 像素。
+
+        Args:
+            image: 原始图片。
+            rect: (left, top, right, bottom) 裁剪矩形。
+            margin: 外扩像素，避免裁掉窗口边缘控件。
+
+        Returns:
+            裁剪后的图片；裁剪后过小时返回原图。
+        """
+        left, top, right, bottom = rect
+        w, h = image.size
+        left = max(0, left - margin)
+        top = max(0, top - margin)
+        right = min(w, right + margin)
+        bottom = min(h, bottom + margin)
+        if right - left < 50 or bottom - top < 50:
+            return image  # 裁剪后太小，放弃裁剪
+        return image.crop((left, top, right, bottom))
+
+    @staticmethod
+    def _bbox_in_rect(bbox: tuple, rect: tuple, margin: int = 40) -> bool:
+        """判断标注边界框中心是否落在窗口矩形内（含外扩 margin）。
+
+        Args:
+            bbox: 标注边界框 (x1, y1, x2, y2)。
+            rect: 窗口矩形 (left, top, right, bottom)。
+            margin: 外扩像素。
+
+        Returns:
+            True 表示标注在窗口内，应展示给模型。
+        """
+        if not bbox:
+            return False
+        x1, y1, x2, y2 = bbox
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        left, top, right, bottom = rect
+        return (left - margin) <= cx <= (right + margin) and \
+               (top - margin) <= cy <= (bottom + margin)
+
+    @staticmethod
+    def _screen_pixel_diff(img_before, img_after, sample: int = 64) -> float:
+        """计算两张截图缩小后的像素差异比例 (0~1)。
+
+        缩小到 sample×sample 再比较，速度快且对微小噪声不敏感。
+        用于检测 UIA 结构未变但显示内容变了的情况（如计算器 0→1）。
+
+        Args:
+            img_before: 动作前截图（PIL Image）。
+            img_after: 动作后截图。
+            sample: 缩放边长，越小越快但灵敏度越低。
+
+        Returns:
+            差异像素占比 (0~1)，1 表示完全不同。
+        """
+        try:
+            from PIL import ImageChops
+
+            a = img_before.convert("RGB").resize((sample, sample))
+            b = img_after.convert("RGB").resize((sample, sample))
+            # 转灰度再统计：histogram 按通道独立统计，彩色 diff 的 hist[0]
+            # 只覆盖 R 通道零值，会导致"相同图"也算出非零差异。
+            diff = ImageChops.difference(a, b).convert("L")
+            hist = diff.histogram()
+            total = sum(hist)
+            if total == 0:
+                return 0.0
+            changed = total - hist[0]  # 去掉完全相同的像素（灰度值为0）
+            return changed / total
+        except Exception:
+            return 0.0
+
+    @staticmethod
     def _has_state_changed(before: dict, after: dict) -> bool:
         """对比前后状态快照，判断是否有实质性变化。
 
@@ -478,6 +585,23 @@ class TaskManager:
                     for num, info in marker_map.items()
                 ]
 
+                # 放大到前台窗口：完整截图中应用窗口太小，标注编号模型读不清。
+                # 裁剪标注图到窗口区域，并只保留窗口内标注的说明文字。
+                # 注意：marker_map 的 click_point 仍是屏幕绝对坐标，编号映射不变。
+                fg_rect = None
+                if not is_desktop:
+                    fg_rect = self._get_foreground_window_rect()
+                if fg_rect:
+                    annotated_image = self._crop_image(annotated_image, fg_rect)
+                    in_window = [
+                        num for num, info in marker_map.items()
+                        if self._bbox_in_rect(info.get("bbox"), fg_rect)
+                    ]
+                    marker_text_lines = [
+                        _build_marker_line(num, marker_map[num])
+                        for num in in_window
+                    ]
+
                 # 验证-纠正：连续无变化时，在下一次模型查询前注入恢复提示
                 recovery_hint = ""
                 if VERIFY_CORRECT_ENABLED and consecutive_no_change >= VERIFY_CORRECT_MAX_NO_CHANGE:
@@ -604,6 +728,20 @@ class TaskManager:
                     time.sleep(VERIFY_CORRECT_WAIT)
                     post_state = self._capture_state()
                     changed = self._has_state_changed(pre_state, post_state)
+                    if not changed:
+                        # UIA/标题没变化，但显示内容可能变了（计算器 0→1、文档内容等）。
+                        # 用像素对比兜底：动作前后的截图差异超过阈值即视为有变化。
+                        try:
+                            post_img = capture()
+                            ratio = self._screen_pixel_diff(image, post_img)
+                            if ratio > VERIFY_PIXEL_THRESHOLD:
+                                logger.info(
+                                    f"[Verify] 步骤{step} 像素差异 {ratio:.1%}，"
+                                    f"判定为有变化"
+                                )
+                                changed = True
+                        except Exception as e:
+                            logger.debug(f"[Verify] 像素对比失败: {e}")
                     if not changed:
                         consecutive_no_change += 1
                         logger.warning(

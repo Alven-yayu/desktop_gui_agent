@@ -128,6 +128,9 @@ AGENT_STEP_DELAY = (0.5, 2.0)  # 步骤间随机延迟范围 (min, max)，单位
 VERIFY_CORRECT_ENABLED = True       # 是否启用验证-纠正循环：每步执行后检测状态变化
 VERIFY_CORRECT_MAX_NO_CHANGE = 2    # 连续无变化步数阈值，超限后注入恢复提示
 VERIFY_CORRECT_WAIT = 0.3           # 动作执行后等待UI稳定的时间（秒）
+VERIFY_PIXEL_THRESHOLD = 0.01       # 像素对比阈值：动作前后截图差异比例超过此值
+                                    # 视为"有变化"。用于检测 UIA 结构未变但显示
+                                    # 内容变了的情况（如计算器 0→1→1+）。
 
 # ===== 截图标注配置 =====
 ANNOTATE_MAX_ITEMS = 30  # 每步最多标注的元素数量（UIA 绿框 + OCR 橙点总和）。
@@ -216,7 +219,10 @@ PROMPT_SYSTEM = """你是桌面GUI智能体。接收屏幕截图（带标注）�
 - 已经看到开始菜单/搜索框打开着 → 不要再按 hotkey(win)，直接 type()
 - 屏幕上有按钮/控件（绿框或橙点）→ 用 click_marker/double_click_marker 点击，
   禁止用 press 打数字或符号键（+、-、*、= 等）
-- press 只用于导航键（Tab/方向键/Enter/Delete）；输入数字和符号用 type() 或点屏幕按钮"""
+- press 只用于导航键（Tab/方向键/Enter/Delete）；输入数字和符号用 type() 或点屏幕按钮
+- 完成任务前必须验证：先观察屏幕确认最终结果已显示，再用 finish 报告**屏幕上实际看到的内容**
+- 禁止在结果未显示时提前 finish；不准谎报"任务已完成""在后台执行"等未经屏幕证实的内容
+- 每执行一个动作后，都要重新观察屏幕判断是否生效，再决定下一步"""
 
 
 PROMPT_USER_TEMPLATE = """用户任务：{task}

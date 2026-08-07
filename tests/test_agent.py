@@ -779,6 +779,84 @@ class TestBuildHistoryActions:
         assert result == ["动作1"]
 
 
+class TestTaskManagerPerceptionHelpers:
+    """窗口放大裁剪 + 像素对比辅助方法测试"""
+
+    def test_bbox_in_rect_center_inside(self):
+        """标注中心在窗口内 → True"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        bbox = (100, 100, 200, 200)  # 中心 (150,150)
+        rect = (0, 0, 300, 300)
+        assert TaskManager._bbox_in_rect(bbox, rect) is True
+
+    def test_bbox_in_rect_center_outside(self):
+        """标注中心在窗口外 → False"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        bbox = (500, 500, 600, 600)  # 中心 (550,550)
+        rect = (0, 0, 300, 300)
+        assert TaskManager._bbox_in_rect(bbox, rect) is False
+
+    def test_bbox_in_rect_none_returns_false(self):
+        """空 bbox → False"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        assert TaskManager._bbox_in_rect(None, (0, 0, 100, 100)) is False
+
+    def test_crop_image_zooms_to_rect(self):
+        """裁剪到窗口矩形（含坐标偏移）"""
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        img = Image.new("RGB", (1000, 800), color=(255, 255, 255))
+        cropped = TaskManager._crop_image(img, (100, 100, 500, 400), margin=0)
+        assert cropped.size == (400, 300)
+
+    def test_crop_image_clamps_to_bounds(self):
+        """矩形超出图片边界时裁剪到边界内"""
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        img = Image.new("RGB", (300, 300), color=(255, 255, 255))
+        cropped = TaskManager._crop_image(img, (-100, -100, 200, 200), margin=0)
+        assert cropped.size[0] <= 300
+        assert cropped.size[1] <= 300
+
+    def test_crop_image_too_small_returns_original(self):
+        """裁剪后过小（<50px）时返回原图，不裁剪"""
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        img = Image.new("RGB", (300, 300), color=(255, 255, 255))
+        cropped = TaskManager._crop_image(img, (0, 0, 30, 30), margin=0)
+        assert cropped is img
+
+    def test_pixel_diff_identical_images_zero(self):
+        """相同图片差异为 0"""
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        img = Image.new("RGB", (100, 100), color=(255, 0, 0))
+        assert TaskManager._screen_pixel_diff(img, img.copy()) == 0.0
+
+    def test_pixel_diff_different_images_positive(self):
+        """不同图片差异显著大于 0"""
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        a = Image.new("RGB", (100, 100), color=(255, 0, 0))
+        b = Image.new("RGB", (100, 100), color=(0, 0, 255))
+        ratio = TaskManager._screen_pixel_diff(a, b)
+        assert ratio > 0.5
+
+    def test_get_foreground_window_rect_no_window(self):
+        """无前台窗口（GetForegroundWindow 返回 0）→ None"""
+        from unittest.mock import patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        with patch("ctypes.windll.user32.GetForegroundWindow", return_value=0):
+            assert TaskManager._get_foreground_window_rect() is None
+
+    def test_get_foreground_window_rect_exception_returns_none(self):
+        """内部异常时返回 None，不崩溃"""
+        from unittest.mock import patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        with patch("ctypes.windll.user32.GetForegroundWindow", side_effect=AttributeError):
+            assert TaskManager._get_foreground_window_rect() is None
+
+
 class TestTaskManagerRun:
     """TaskManager.run() 主循环测试"""
 
