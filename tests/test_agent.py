@@ -1377,6 +1377,30 @@ class TestPromptBuilding:
         assert "【点击标注" in system_content
         assert "计算器" in system_content
 
+    def test_prompt_has_common_scenario_strategies(self):
+        """PROMPT_SYSTEM 应包含常见场景策略（文件对话框/复制粘贴/右键菜单）"""
+        import desktop_gui_agent.config as config
+        assert "常见场景策略" in config.PROMPT_SYSTEM
+        assert "hotkey(ctrl, l)" in config.PROMPT_SYSTEM  # 文件对话框地址栏
+        assert "Alt+Tab" in config.PROMPT_SYSTEM  # 应用切换
+
+    def test_prompt_action_table_has_new_actions(self):
+        """PROMPT_SYSTEM 动作表应包含右键/拖拽/单键"""
+        import desktop_gui_agent.config as config
+        assert "right_click_marker" in config.PROMPT_SYSTEM
+        assert "drag_marker" in config.PROMPT_SYSTEM
+        assert "press(key=" in config.PROMPT_SYSTEM
+
+    def test_few_shot_has_medium_scenarios(self):
+        """few-shot 应包含右键/拖拽/保存对话框等中等任务场景"""
+        import desktop_gui_agent.config as config
+        joined = "\n".join(config.PROMPT_FEW_SHOT_EXAMPLES)
+        assert "right_click_marker" in joined      # 右键菜单
+        assert "drag_marker" in joined             # 拖拽选文本
+        assert "hotkey(ctrl, c)" in joined         # 跨应用复制
+        assert "hotkey(ctrl, l)" in joined         # 保存对话框
+        assert "press(key=\"tab\")" in joined      # 单键切换焦点
+
     @patch('desktop_gui_agent.agent.model_client.process_vision_info')
     @patch('desktop_gui_agent.agent.model_client._load_local_model')
     def test_cot_guidance_in_user_prompt(self, mock_load, mock_pvi):

@@ -502,16 +502,21 @@ class TaskManager:
                 except Exception:
                     pass
 
+                # 基础上下文始终保留（即使 0 个标注，模型也需要知道光标/前台窗口）
                 marker_extra = (
                     recovery_hint +
                     cursor_line +
                     f"【当前前台窗口】{fg_window_title}\n"
-                    "【屏幕标注说明】\n"
-                    "  绿色矩形框 = Windows 应用按钮/控件（来自 UIA）\n"
-                    "  橙色圆点 = 非标准 UI 文字（来自 OCR）\n"
-                    "  请观察标注在图中的实际位置，用编号指定目标：\n"
-                    + "\n".join(marker_text_lines)
-                ) if marker_text_lines else recovery_hint if recovery_hint else ""
+                )
+                # 标注说明仅在有标注时追加（含 0 个标注的空桌面）
+                if marker_text_lines:
+                    marker_extra += (
+                        "【屏幕标注说明】\n"
+                        "  绿色矩形框 = Windows 应用按钮/控件（来自 UIA）\n"
+                        "  橙色圆点 = 非标准 UI 文字（来自 OCR）\n"
+                        "  请观察标注在图中的实际位置，用编号指定目标：\n"
+                        + "\n".join(marker_text_lines)
+                    )
 
                 model_start = time.time()
                 history_actions = self._build_history_actions(history)
