@@ -32,6 +32,7 @@ _INTERACTABLE_TYPES = frozenset({
     "TreeItem",
     "DataItem",
     "Thumb",       # 滑块/滚动条
+    "Slider",      # 滑块控件（快速设置音量/亮度等），供 set_slider 精确设值
     "Text",        # 可点击的文本块（超链接等）
 })
 
@@ -137,6 +138,72 @@ class UiaParser:
             return []
 
     @staticmethod
+    def set_slider_value(bbox: tuple, value: float) -> bool:
+        """通过 UIA RangeValue 模式直接设置滑块值，不依赖鼠标拖拽。
+
+        VLM 无法精确计算滑块上目标位置的像素（如音量 50% 在哪），
+        对标准 UIA 滑块直接用 set_value() 设值最可靠。
+
+        Args:
+            bbox: 滑块控件的边界框 (left, top, right, bottom)，来自标注。
+            value: 目标值（0~100 或控件范围）。
+
+        Returns:
+            True 表示设值成功，False 表示未找到滑块或失败。
+        """
+        if sys.platform != "win32":
+            return False
+        try:
+            cx = (bbox[0] + bbox[2]) // 2
+            cy = (bbox[1] + bbox[3]) // 2
+            # 在前台窗口和任务栏中查找匹配的滑块
+            for hwnd in (_get_foreground_hwnd(), _get_taskbar_hwnd()):
+                if not hwnd:
+                    continue
+                window = _wrap_hwnd(hwnd)
+                if window is None:
+                    continue
+                try:
+                    descendants = window.descendants()
+                except Exception:
+                    continue
+                for elem in descendants:
+                    try:
+                        ctrl_type = elem.element_info.control_type
+                        if ctrl_type not in ("Slider", "Thumb"):
+                            continue
+                        rect = elem.element_info.rectangle
+                        if rect is None:
+                            continue
+                        ecx = (rect.left + rect.right) // 2
+                        ecy = (rect.top + rect.bottom) // 2
+                    except Exception:
+                        continue
+                    # 中心距离 60px 内视为匹配
+                    if abs(ecx - cx) > 60 or abs(ecy - cy) > 60:
+                        continue
+                    target = elem
+                    # Thumb 本身不能设值，取其父级 Slider
+                    if ctrl_type == "Thumb":
+                        try:
+                            parent = elem.parent()
+                            if parent is not None:
+                                target = parent
+                        except Exception:
+                            pass
+                    try:
+                        target.set_value(float(value))
+                        logger.info(f"UIA 设置滑块值: {value} ({ctrl_type})")
+                        return True
+                    except Exception:
+                        return False
+            logger.debug(f"UIA 未找到匹配滑块: bbox={bbox}")
+            return False
+        except Exception as e:
+            logger.debug(f"UIA 设置滑块值失败: {e}")
+            return False
+
+    @staticmethod
     def get_taskbar_controls(
         include_types: Optional[frozenset] = None,
     ) -> List[Dict[str, Any]]:
@@ -189,6 +256,15 @@ def _get_foreground_hwnd() -> Optional[int]:
     if hwnd == 0:
         return None
     return hwnd
+
+
+def _get_taskbar_hwnd() -> Optional[int]:
+    """获取任务栏窗口（Shell_TrayWnd）句柄，失败返回 None。"""
+    try:
+        hwnd = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
+        return hwnd if hwnd != 0 else None
+    except Exception:
+        return None
 
 
 def _get_window_title(hwnd: int) -> str:

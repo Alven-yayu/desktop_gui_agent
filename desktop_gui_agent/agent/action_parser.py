@@ -52,6 +52,12 @@ _PATTERN_PRESS = re.compile(
     re.IGNORECASE,
 )
 
+# 滑块精确设值（UIA RangeValue 模式直接设，不用鼠标拖拽）
+_PATTERN_SET_SLIDER = re.compile(
+    r'(?<!_)set_slider\s*\(\s*marker\s*=\s*(\d+)\s*,\s*value\s*=\s*(\d+)\s*\)',
+    re.IGNORECASE,
+)
+
 # 传统坐标动作（兼容旧版，不推荐）
 _PATTERN_DOUBLE_CLICK = re.compile(
     r'double_click\s*\(\s*x\s*=\s*(-?\d+)\s*,\s*y\s*=\s*(-?\d+)\s*\)',
@@ -168,6 +174,11 @@ def _build_press_params(match: re.Match) -> Dict[str, str]:
     return {"key": match.group(1)}
 
 
+def _build_set_slider_params(match: re.Match) -> Dict[str, int]:
+    """从正则匹配结果构建 set_slider 参数字典。"""
+    return {"marker": int(match.group(1)), "value": int(match.group(2))}
+
+
 def _build_double_click_params(match: re.Match) -> Dict[str, int]:
     """从正则匹配结果构建 double_click 参数字典。"""
     return {"x": int(match.group(1)), "y": int(match.group(2))}
@@ -223,6 +234,7 @@ _PARSERS = [
     (_PATTERN_DOUBLE_CLICK_MARKER, "double_click_marker", _build_double_click_marker_params),
     (_PATTERN_DRAG_MARKER, "drag_marker", _build_drag_marker_params),
     (_PATTERN_DRAG, "drag", _build_drag_params),
+    (_PATTERN_SET_SLIDER, "set_slider", _build_set_slider_params),
     (_PATTERN_PRESS, "press", _build_press_params),
     # 传统坐标动作（兼容）
     (_PATTERN_DOUBLE_CLICK, "double_click", _build_double_click_params),

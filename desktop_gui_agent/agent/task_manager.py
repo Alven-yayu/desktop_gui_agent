@@ -26,6 +26,7 @@ from desktop_gui_agent.control.keyboard_controller import KeyboardController
 from desktop_gui_agent.control.mouse_controller import MouseController
 from desktop_gui_agent.perception.ocr_recognizer import recognize
 from desktop_gui_agent.perception.screenshot import capture
+from desktop_gui_agent.perception.uia_parser import UiaParser
 from desktop_gui_agent.utils.exceptions import ErrorCategory, OCRError, ScreenshotError, classify_error
 from desktop_gui_agent.utils.logger import get_logger
 from desktop_gui_agent.utils.platform import PlatformInfo
@@ -183,6 +184,18 @@ class TaskManager:
             )
         elif action_type == "press":
             return self.keyboard.press(params["key"])
+        elif action_type == "set_slider":
+            # 通过 UIA RangeValue 模式直接设滑块值（音量/亮度等），不用鼠标拖拽
+            info = self._marker_map.get(params["marker"], {})
+            bbox = info.get("bbox")
+            if not bbox:
+                logger.warning(f"标注 #{params['marker']} 无 bbox，无法设滑块")
+                return False
+            logger.info(
+                f"[UIA] set_slider(#{params['marker']}) → "
+                f"value={params['value']} \"{info.get('text', '')}\""
+            )
+            return UiaParser.set_slider_value(bbox, params["value"])
         elif action_type == "click":
             return self.mouse.click(params["x"], params["y"])
         elif action_type == "double_click":
@@ -594,8 +607,6 @@ class TaskManager:
 
                 # 2.5 UIA 感知：获取前台窗口的原生 UI 控件树
                 # （Windows 标准应用可精确定位按钮/文本框，不用猜坐标）
-                from desktop_gui_agent.perception.uia_parser import UiaParser
-
                 uia_controls = []
                 try:
                     uia_controls = UiaParser.get_foreground_controls()
