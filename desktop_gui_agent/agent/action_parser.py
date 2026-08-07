@@ -58,6 +58,13 @@ _PATTERN_SET_SLIDER = re.compile(
     re.IGNORECASE,
 )
 
+# 通用控件设值：按控件类型自动分发（滑块/输入框/复选框/下拉框/单选）
+# value 支持引号字符串（下拉选项、文本）或数字（滑块）
+_PATTERN_SET_CONTROL = re.compile(
+    r'(?<!_)set_control\s*\(\s*marker\s*=\s*(\d+)\s*,\s*value\s*=\s*(?:"([^"]*)"|(\d+))\s*\)',
+    re.IGNORECASE,
+)
+
 # 传统坐标动作（兼容旧版，不推荐）
 _PATTERN_DOUBLE_CLICK = re.compile(
     r'double_click\s*\(\s*x\s*=\s*(-?\d+)\s*,\s*y\s*=\s*(-?\d+)\s*\)',
@@ -179,6 +186,21 @@ def _build_set_slider_params(match: re.Match) -> Dict[str, int]:
     return {"marker": int(match.group(1)), "value": int(match.group(2))}
 
 
+def _build_set_control_params(match: re.Match) -> Dict[str, Any]:
+    """从正则匹配结果构建 set_control 参数字典。
+
+    value 支持两种形式：
+    - 引号字符串（下拉框选项、输入框文本、复选状态）
+    - 数字（滑块目标值）
+    """
+    marker = int(match.group(1))
+    if match.group(2) is not None:
+        value = match.group(2)  # 带引号的字符串
+    else:
+        value = int(match.group(3))  # 数字
+    return {"marker": marker, "value": value}
+
+
 def _build_double_click_params(match: re.Match) -> Dict[str, int]:
     """从正则匹配结果构建 double_click 参数字典。"""
     return {"x": int(match.group(1)), "y": int(match.group(2))}
@@ -235,6 +257,7 @@ _PARSERS = [
     (_PATTERN_DRAG_MARKER, "drag_marker", _build_drag_marker_params),
     (_PATTERN_DRAG, "drag", _build_drag_params),
     (_PATTERN_SET_SLIDER, "set_slider", _build_set_slider_params),
+    (_PATTERN_SET_CONTROL, "set_control", _build_set_control_params),
     (_PATTERN_PRESS, "press", _build_press_params),
     # 传统坐标动作（兼容）
     (_PATTERN_DOUBLE_CLICK, "double_click", _build_double_click_params),

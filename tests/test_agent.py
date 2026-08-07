@@ -351,6 +351,27 @@ class TestActionParser:
         result = parse("set_slider(marker=18)")
         assert result["action_type"] == "unknown"
 
+    # ---- set_control（通用控件设值）----
+    def test_parse_set_control_numeric_value(self):
+        """set_control 数字 value（滑块）"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("set_control(marker=18, value=50)")
+        assert result["action_type"] == "set_control"
+        assert result["params"] == {"marker": 18, "value": 50}
+
+    def test_parse_set_control_string_value(self):
+        """set_control 字符串 value（下拉选项/文本）"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('set_control(marker=5, value=".txt")')
+        assert result["action_type"] == "set_control"
+        assert result["params"] == {"marker": 5, "value": ".txt"}
+
+    def test_parse_set_control_not_swallowed_by_click(self):
+        """set_control 不能被 click 正则误吞"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("set_control(marker=5, value=\"on\")")
+        assert result["action_type"] == "set_control"
+
 
 # ===== ModelClient 测试 =====
 from unittest.mock import patch, MagicMock
@@ -756,30 +777,44 @@ class TestTaskManagerDispatch:
         mock_mouse.drag_from_to.assert_not_called()
 
     def test_dispatch_set_slider_calls_uia(self):
-        """set_slider 应调用 UiaParser.set_slider_value(bbox, value)"""
-        from unittest.mock import MagicMock, patch
+        """set_slider 应调用 UiaParser.set_control_value(bbox, value)"""
+        from unittest.mock import patch
         from desktop_gui_agent.agent.task_manager import TaskManager
         tm = TaskManager()
         tm._marker_map = {18: {"bbox": (100, 200, 300, 220), "text": "声音输出"}}
         with patch("desktop_gui_agent.agent.task_manager.UiaParser") as mock_uia:
-            mock_uia.set_slider_value.return_value = True
+            mock_uia.set_control_value.return_value = True
             result = tm._dispatch(
                 {"action_type": "set_slider", "params": {"marker": 18, "value": 50}}
             )
-            mock_uia.set_slider_value.assert_called_once_with((100, 200, 300, 220), 50)
+            mock_uia.set_control_value.assert_called_once_with((100, 200, 300, 220), 50)
         assert result is True
 
-    def test_dispatch_set_slider_missing_bbox_returns_false(self):
-        """set_slider 指向无 bbox 的标注应返回 False"""
+    def test_dispatch_set_control_string_value(self):
+        """set_control 的字符串 value 应传给 set_control_value"""
+        from unittest.mock import patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        tm = TaskManager()
+        tm._marker_map = {5: {"bbox": (10, 20, 100, 40), "text": "文件类型"}}
+        with patch("desktop_gui_agent.agent.task_manager.UiaParser") as mock_uia:
+            mock_uia.set_control_value.return_value = True
+            result = tm._dispatch(
+                {"action_type": "set_control", "params": {"marker": 5, "value": ".txt"}}
+            )
+            mock_uia.set_control_value.assert_called_once_with((10, 20, 100, 40), ".txt")
+        assert result is True
+
+    def test_dispatch_set_control_missing_bbox_returns_false(self):
+        """set_control 指向无 bbox 的标注应返回 False"""
         from unittest.mock import patch
         from desktop_gui_agent.agent.task_manager import TaskManager
         tm = TaskManager()
         tm._marker_map = {}  # 空标注
         with patch("desktop_gui_agent.agent.task_manager.UiaParser") as mock_uia:
             result = tm._dispatch(
-                {"action_type": "set_slider", "params": {"marker": 99, "value": 50}}
+                {"action_type": "set_control", "params": {"marker": 99, "value": 50}}
             )
-            mock_uia.set_slider_value.assert_not_called()
+            mock_uia.set_control_value.assert_not_called()
         assert result is False
 
 

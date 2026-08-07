@@ -138,25 +138,23 @@ class UiaParser:
             return []
 
     @staticmethod
-    def set_slider_value(bbox: tuple, value: float) -> bool:
-        """通过 UIA RangeValue 模式直接设置滑块值，不依赖鼠标拖拽。
-
-        VLM 无法精确计算滑块上目标位置的像素（如音量 50% 在哪），
-        对标准 UIA 滑块直接用 set_value() 设值最可靠。
+    def _find_control_by_bbox(
+        bbox: tuple, match_types: Optional[tuple] = None,
+    ):
+        """在前台窗口和任务栏中按边界框中心匹配控件元素。
 
         Args:
-            bbox: 滑块控件的边界框 (left, top, right, bottom)，来自标注。
-            value: 目标值（0~100 或控件范围）。
+            bbox: 目标控件的边界框 (left, top, right, bottom)。
+            match_types: 允许的控件类型元组，None 则不限类型。
 
         Returns:
-            True 表示设值成功，False 表示未找到滑块或失败。
+            pywinauto 控件元素；未找到返回 None。
         """
         if sys.platform != "win32":
-            return False
+            return None
         try:
             cx = (bbox[0] + bbox[2]) // 2
             cy = (bbox[1] + bbox[3]) // 2
-            # 在前台窗口和任务栏中查找匹配的滑块
             for hwnd in (_get_foreground_hwnd(), _get_taskbar_hwnd()):
                 if not hwnd:
                     continue
@@ -170,7 +168,7 @@ class UiaParser:
                 for elem in descendants:
                     try:
                         ctrl_type = elem.element_info.control_type
-                        if ctrl_type not in ("Slider", "Thumb"):
+                        if match_types and ctrl_type not in match_types:
                             continue
                         rect = elem.element_info.rectangle
                         if rect is None:
@@ -179,28 +177,96 @@ class UiaParser:
                         ecy = (rect.top + rect.bottom) // 2
                     except Exception:
                         continue
-                    # 中心距离 60px 内视为匹配
                     if abs(ecx - cx) > 60 or abs(ecy - cy) > 60:
                         continue
-                    target = elem
-                    # Thumb 本身不能设值，取其父级 Slider
-                    if ctrl_type == "Thumb":
-                        try:
-                            parent = elem.parent()
-                            if parent is not None:
-                                target = parent
-                        except Exception:
-                            pass
-                    try:
-                        target.set_value(float(value))
-                        logger.info(f"UIA 设置滑块值: {value} ({ctrl_type})")
-                        return True
-                    except Exception:
-                        return False
-            logger.debug(f"UIA 未找到匹配滑块: bbox={bbox}")
+                    return elem
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def set_slider_value(bbox: tuple, value: float) -> bool:
+        """兼容旧动作：仅设滑块值（等价于 set_control_value 的滑块分支）。"""
+        return UiaParser.set_control_value(bbox, value)
+
+    @staticmethod
+    def set_control_value(bbox: tuple, value) -> bool:
+        """按控件类型通过 UIA 直接设置值，不依赖鼠标精确点击。
+
+        VLM 无法精确计算目标像素位置（音量 50% 在哪、下拉选项点哪），
+        对标准 UIA 控件直接用对应模式设值最可靠。这是"UIA 精细操作"
+        能力的通用实现，覆盖：滑块/输入框/复选框/下拉框/单选按钮。
+
+        Args:
+            bbox: 控件的边界框 (left, top, right, bottom)，来自标注。
+            value: 目标值。滑块为数字，其余为字符串。
+
+        Returns:
+            True 表示设值成功，False 表示未找到控件或失败。
+        """
+        if sys.platform != "win32":
             return False
+        try:
+            elem = UiaParser._find_control_by_bbox(bbox)
+            if elem is None:
+                logger.debug(f"UIA 未找到匹配控件: bbox={bbox}")
+                return False
+
+            try:
+                ctrl_type = elem.element_info.control_type
+            except Exception:
+                ctrl_type = ""
+
+            # 滑块（或滑块的 Thumb → 取父级 Slider）
+            if ctrl_type in ("Slider", "Thumb"):
+                target = elem
+                if ctrl_type == "Thumb":
+                    try:
+                        parent = elem.parent()
+                        if parent is not None:
+                            target = parent
+                    except Exception:
+                        pass
+                target.set_value(float(value))
+                logger.info(f"UIA 设滑块值: {value}")
+                return True
+
+            # 输入框：ValuePattern 直接设文本
+            if ctrl_type == "Edit":
+                elem.set_value(str(value))
+                logger.info(f"UIA 设输入框文本: {value}")
+                return True
+
+            # 复选框：TogglePattern 按目标状态切换
+            if ctrl_type == "CheckBox":
+                want_on = str(value).lower() in ("on", "1", "true", "check", "勾选", "选中")
+                try:
+                    state = elem.get_toggle_state()  # 0=off, 1=on
+                except Exception:
+                    state = None
+                if state is not None and ((want_on and state != 1) or (not want_on and state == 1)):
+                    elem.toggle()
+                logger.info(f"UIA 设复选框: {'on' if want_on else 'off'}")
+                return True
+
+            # 下拉框：展开并选择选项
+            if ctrl_type == "ComboBox":
+                elem.select(str(value))
+                logger.info(f"UIA 选下拉选项: {value}")
+                return True
+
+            # 单选按钮：选择
+            if ctrl_type == "RadioButton":
+                if str(value).lower() in ("on", "1", "true", "select", "选中", "选择"):
+                    elem.select()
+                    logger.info(f"UIA 选单选按钮")
+                return True
+
+            logger.debug(f"set_control 不支持的控件类型: {ctrl_type}")
+            return False
+
         except Exception as e:
-            logger.debug(f"UIA 设置滑块值失败: {e}")
+            logger.debug(f"UIA set_control 失败: {e}")
             return False
 
     @staticmethod

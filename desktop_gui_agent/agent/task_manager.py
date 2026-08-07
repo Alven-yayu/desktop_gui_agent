@@ -184,18 +184,19 @@ class TaskManager:
             )
         elif action_type == "press":
             return self.keyboard.press(params["key"])
-        elif action_type == "set_slider":
-            # 通过 UIA RangeValue 模式直接设滑块值（音量/亮度等），不用鼠标拖拽
+        elif action_type in ("set_slider", "set_control"):
+            # 通过 UIA 直接设标准控件值（滑块/输入框/复选/下拉/单选），
+            # 不依赖鼠标精确点击。set_slider 是 set_control 的兼容别名。
             info = self._marker_map.get(params["marker"], {})
             bbox = info.get("bbox")
             if not bbox:
-                logger.warning(f"标注 #{params['marker']} 无 bbox，无法设滑块")
+                logger.warning(f"标注 #{params['marker']} 无 bbox，无法设控件值")
                 return False
             logger.info(
-                f"[UIA] set_slider(#{params['marker']}) → "
+                f"[UIA] {action_type}(#{params['marker']}) → "
                 f"value={params['value']} \"{info.get('text', '')}\""
             )
-            return UiaParser.set_slider_value(bbox, params["value"])
+            return UiaParser.set_control_value(bbox, params["value"])
         elif action_type == "click":
             return self.mouse.click(params["x"], params["y"])
         elif action_type == "double_click":
