@@ -136,6 +136,45 @@ class UiaParser:
             logger.debug(f"UIA 感知失败（hwnd={hwnd}）: {e}")
             return []
 
+    @staticmethod
+    def get_taskbar_controls(
+        include_types: Optional[frozenset] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取 Windows 任务栏/系统托盘的可交互控件。
+
+        前台窗口 UIA 覆盖不到任务栏（音量图标、系统托盘等小目标）。
+        任务栏窗口类为 Shell_TrayWnd，直接按类名查找并读取其控件树。
+
+        Args:
+            include_types: 要收集的控件类型集合，None 则使用默认列表。
+
+        Returns:
+            任务栏控件信息列表；任务栏不存在或读取失败返回空列表。
+        """
+        if sys.platform != "win32":
+            return []
+
+        types_to_collect = include_types or _INTERACTABLE_TYPES
+
+        try:
+            # 主任务栏窗口（含系统托盘）。Shell_TrayWnd 是 Windows 固定类名。
+            hwnd = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
+            if hwnd == 0:
+                return []
+            window = _wrap_hwnd(hwnd)
+            if window is None:
+                return []
+
+            controls = _collect_descendants(window, types_to_collect)
+            controls.sort(key=lambda c: (c["bbox"][1], c["bbox"][0]))
+            if controls:
+                logger.debug(f"UIA 任务栏感知：共 {len(controls)} 个可交互控件")
+            return controls
+
+        except Exception as e:
+            logger.debug(f"UIA 任务栏感知失败: {e}")
+            return []
+
 
 # ===== 内部辅助 =====
 

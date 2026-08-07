@@ -169,6 +169,32 @@ class TestMinimizeConsole:
             assert _is_terminal_window(1) is False
 
 
+# ===== UiaParser 任务栏感知测试 =====
+
+class TestUiaTaskbar:
+    """UiaParser.get_taskbar_controls() 测试"""
+
+    def test_get_taskbar_controls_returns_list(self):
+        """应返回列表（Windows 上任务栏存在时可能非空）"""
+        from desktop_gui_agent.perception.uia_parser import UiaParser
+        result = UiaParser.get_taskbar_controls()
+        assert isinstance(result, list)
+
+    def test_get_taskbar_controls_non_windows(self, monkeypatch):
+        """非 Windows 平台返回空列表"""
+        monkeypatch.setattr("sys.platform", "darwin")
+        from desktop_gui_agent.perception.uia_parser import UiaParser
+        assert UiaParser.get_taskbar_controls() == []
+
+    def test_taskbar_controls_have_bbox(self):
+        """任务栏控件应含 bbox/click_point 字段"""
+        from desktop_gui_agent.perception.uia_parser import UiaParser
+        controls = UiaParser.get_taskbar_controls()
+        for c in controls:
+            assert "bbox" in c
+            assert "click_point" in c
+
+
 # ===== annotate_screenshot OCR 点击点测试 =====
 
 class TestAnnotateOcrClickPoint:

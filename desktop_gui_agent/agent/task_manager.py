@@ -601,6 +601,12 @@ class TaskManager:
                     uia_controls = UiaParser.get_foreground_controls()
                 except Exception as e:
                     logger.debug(f"UIA 感知跳过: {e}")
+                # 补充任务栏/系统托盘控件：前台窗口 UIA 覆盖不到音量图标等
+                # 小目标（它们属于任务栏窗口），合并后标注能给它们精确坐标。
+                try:
+                    uia_controls += UiaParser.get_taskbar_controls()
+                except Exception as e:
+                    logger.debug(f"UIA 任务栏感知跳过: {e}")
 
                 # 3. 截图标注 + 模型推理
                 # 融合标注：UIA 控件(绿色矩形框) + OCR 文字(橙色圆点)，
@@ -641,9 +647,14 @@ class TaskManager:
                     # 裁剪原始截图到窗口，并平移 UIA/OCR 坐标到裁剪图坐标系
                     crop_img = image.crop(fg_rect)
                     offset_x, offset_y = fg_rect[0], fg_rect[1]
+                    # 只保留窗口内的控件（任务栏在窗口外，裁剪后应排除）
+                    uia_in_window = [
+                        c for c in uia_controls
+                        if self._bbox_in_rect(c.get("bbox"), fg_rect)
+                    ]
                     uia_local = [
                         self._translate_ctrl(c, offset_x, offset_y)
-                        for c in uia_controls
+                        for c in uia_in_window
                     ]
                     ocr_local = [
                         self._translate_ocr(o, offset_x, offset_y)
