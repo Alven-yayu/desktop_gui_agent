@@ -54,13 +54,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=str,
         default=None,
         choices=["local", "dashscope", "ollama"],
-        help="推理后端：local=本地2B模型（默认），dashscope=通义千问云端7B，ollama=本地Ollama",
-    )
-    parser.add_argument(
-        "--gui",
-        action="store_true",
-        default=False,
-        help="启动图形化交互窗口（默认命令行模式）",
+        help="推理后端：local=本地2B模型（默认），dashscope=通义千问云端，ollama=本地Ollama",
     )
     return parser.parse_args(argv)
 
@@ -77,12 +71,6 @@ def main() -> int:
         0 表示成功，1 表示失败。
     """
     args = _parse_args()
-
-    # GUI 模式：启动图形窗口
-    if args.gui:
-        from desktop_gui_agent.gui import launch
-        launch()
-        return 0
 
     # 获取任务描述
     task = args.task

@@ -25,13 +25,20 @@ from desktop_gui_agent.config import (
 from desktop_gui_agent.control.keyboard_controller import KeyboardController
 from desktop_gui_agent.control.mouse_controller import MouseController
 from desktop_gui_agent.perception.ocr_recognizer import recognize
-from desktop_gui_agent.perception.screenshot import capture
+from desktop_gui_agent.perception.screenshot import _is_terminal_window, capture
 from desktop_gui_agent.perception.uia_parser import UiaParser
 from desktop_gui_agent.utils.exceptions import ErrorCategory, OCRError, ScreenshotError, classify_error
 from desktop_gui_agent.utils.logger import get_logger
 from desktop_gui_agent.utils.platform import PlatformInfo
 
 logger = get_logger(__name__)
+
+# "关闭当前窗口"类任务的识别关键词。这些任务的目标是"任务开始时的前台窗口"，
+# 必须以时间锚点界定目标，否则模型会把"当前"当活变量，关一个冒一个。
+_CLOSE_WINDOW_KEYWORDS = (
+    "关闭当前窗口", "关闭当前应用", "关闭当前", "关闭窗口",
+    "关掉当前窗口", "关掉当前",
+)
 
 
 class TaskManager:
@@ -75,6 +82,7 @@ class TaskManager:
         self.model_client = model_client
         self._marker_map: dict = {}  # 标注编号 → 坐标映射
         self._bad_marker_hint = ""  # 上一步模型输出无效标注编号时的纠正提示
+        self._initial_window: dict = {}  # 任务开始时的前台窗口锚点（关闭窗口守卫用）
         logger.info(
             f"TaskManager 初始化，max_steps={max_steps}，"
             f"max_consecutive_errors={max_consecutive_errors}"
@@ -317,6 +325,186 @@ class TaskManager:
         """
         actions = [h["action_raw"] for h in history if "action_raw" in h]
         return actions[-HISTORY_MAX_ITEMS:]
+
+    # ===== 任务开始锚点 / 关闭窗口守卫 / 受保护窗口 =====
+    # "关闭当前窗口"类任务必须以任务开始时的前台窗口为锚点界定目标，
+    # 否则模型把"当前"当活变量，关一个冒一个，永远不会 finish。
+
+    @staticmethod
+    def _is_close_window_task(task: str) -> bool:
+        """判断任务是否是"关闭当前窗口"类任务。
+
+        Args:
+            task: 用户任务描述文本。
+
+        Returns:
+            True 表示目标是"任务开始时的前台窗口"（关闭它即完成）。
+        """
+        return any(kw in task for kw in _CLOSE_WINDOW_KEYWORDS)
+
+    @staticmethod
+    def _capture_initial_window() -> dict:
+        """捕获任务开始时的前台窗口，作为任务锚点。
+
+        在终端最小化之后调用，锚点应落在真实用户窗口（而非本程序终端）。
+        若前台仍是终端/命令提示符窗口（本程序运行环境），不设锚点——
+        这类窗口不能作为"关闭当前窗口"的目标，返回空字典让守卫安全降级，
+        避免与"运行任务先最小化终端"功能冲突。
+
+        Returns:
+            {"title": str, "hwnd": int}；不可用（桌面/终端/失败）时返回 {}。
+        """
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                return {}
+            # 前台是终端 → 不是可关闭的用户窗口，且本程序运行窗口本就受保护。
+            # 与"最小化终端"功能配合：最小化已把终端移开，这里做兜底，双保险。
+            if _is_terminal_window(hwnd):
+                return {}
+            buf = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+            return {
+                "title": buf.value,
+                "hwnd": hwnd,
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _window_alive(hwnd) -> bool:
+        """判断窗口句柄是否仍存在且可见。
+
+        无法判断（非 Windows / 句柄无效）时保守返回 True，
+        避免在不确定时误报"目标已关闭"。
+
+        Args:
+            hwnd: 窗口句柄。
+
+        Returns:
+            True 表示窗口还在（或无法判断），False 表示窗口已销毁/隐藏。
+        """
+        try:
+            import ctypes
+            return bool(ctypes.windll.user32.IsWindow(hwnd)) and bool(
+                ctypes.windll.user32.IsWindowVisible(hwnd)
+            )
+        except Exception:
+            return True
+
+    def _build_window_context_extra(
+        self, task: str, initial: dict, fg_title: str, fg_hwnd
+    ) -> str:
+        """构建注入模型上下文的任务开始锚点/完成守卫/安全警告。
+
+        三类文本：
+        1. 通用锚点（每步都注入）：【任务开始时的前台窗口】——让"当前窗口"
+           类任务的目标有唯一时间锚点。
+        2. 关闭任务完成守卫（代码级判据）：任务开始时的前台窗口已消失 →
+           目标已关闭，强制提示模型立即 finish，禁止再关其他窗口。
+        3. 受保护窗口安全警告：当前前台是终端/命令提示符窗口（含本程序终端）
+           → 禁止对它做关闭/最小化/退出操作，防止重演"把 Claude Code 关了"。
+
+        Args:
+            task: 用户任务描述文本。
+            initial: _capture_initial_window() 的返回。
+            fg_title: 当前前台窗口标题。
+            fg_hwnd: 当前前台窗口句柄。
+
+        Returns:
+            拼接好的提示文本，无内容时返回空字符串。
+        """
+        lines = []
+
+        # 1. 通用锚点：记录任务下达时刻的窗口
+        if initial.get("title"):
+            lines.append(f"【任务开始时的前台窗口】{initial['title']}")
+        elif initial:
+            lines.append("【任务开始时的前台窗口】（桌面，无应用窗口）")
+
+        # 2. 关闭任务完成守卫：初始窗口已消失 → 目标已完成，强制收尾
+        if self._is_close_window_task(task) and initial.get("hwnd"):
+            if not self._window_alive(initial["hwnd"]):
+                lines.append(
+                    "【!!! 目标窗口已关闭 — 任务完成 !!!】\n"
+                    f"任务开始时的前台窗口「{initial.get('title', '')}」已关闭"
+                    "（该窗口已不存在）。\n"
+                    '"关闭当前窗口"任务已完成，请立即输出 '
+                    'finish(result="已关闭窗口")。\n'
+                    "禁止继续关闭其他任何窗口！"
+                )
+
+        # 3. 受保护窗口安全警告：当前前台是终端，绝不能关
+        if fg_hwnd and _is_terminal_window(fg_hwnd):
+            lines.append(
+                "【!!! 安全警告 — 当前前台是终端/命令提示符窗口 !!!】\n"
+                "这是本程序运行的终端窗口（受保护窗口），"
+                "禁止对它执行关闭/最小化/退出操作！\n"
+                "如果目标任务窗口已经关闭，请直接 finish。"
+            )
+
+        return ("\n".join(lines) + "\n") if lines else ""
+
+    @staticmethod
+    def _build_repeat_hint(history: list, fg_window_title: str) -> str:
+        """检测模型最近反复执行同一动作，注入打断循环的纠正提示。
+
+        泛化修复根因：任务 1/2（重复 type 死循环）和任务 3（点击/拖拽交替
+        循环）的共同问题是模型反复执行同一动作且不自知，而现有的死循环检测
+        只能"硬杀"（任务失败），不能帮模型跳出循环。此提示在重复出现时
+        注入真实屏幕状态，告诉模型"已生效则收尾、未生效则换方法"。
+
+        Args:
+            history: 已执行步骤历史列表（含 action_type/action_params/success）。
+            fg_window_title: 当前前台窗口标题，用于接地提示。
+
+        Returns:
+            提示文本；最近无重复动作时返回空字符串。
+        """
+        if len(history) < 2:
+            return ""
+        from collections import Counter
+        recent = history[-4:]
+        _CLICK_ACTIONS = (
+            "click_marker", "double_click_marker", "click", "double_click",
+        )
+        # 连续点击过多且无 finish → 优先提示改用键盘输入（键盘优先原则兜底）。
+        # 覆盖"计算器点按钮点出垃圾数字/表格逐个点单元格"这类场景：
+        # 支持键盘输入的应用直接 type() 一次到位，比逐个点按钮可靠。
+        # 放在重复检测之前：点击过多的场景给"换键盘"更可执行，避免模型继续瞎点。
+        click_count = sum(
+            1 for h in recent if h.get("action_type") in _CLICK_ACTIONS
+        )
+        if click_count >= 3:
+            return (
+                "【!!! 提示 — 点按钮太多次，改用键盘输入 !!!】\n"
+                "你最近几步一直在点按钮。如果任务需要输入内容（计算器算式、"
+                "表格数据、文字），请改用 type() 一次性输入全部内容再 hotkey(enter)，"
+                "不要逐个点屏幕按钮！\n\n"
+            )
+        counts = Counter(
+            (h.get("action_type"), str(h.get("action_params", {})))
+            for h in recent
+        )
+        for (act, params), cnt in counts.most_common():
+            if cnt < 2 or act == "finish":
+                continue
+            failed = any(
+                h.get("action_type") == act
+                and str(h.get("action_params", {})) == params
+                and not h.get("success")
+                for h in recent
+            )
+            state_desc = "执行失败" if failed else "已执行"
+            return (
+                "【!!! 纠正 — 你正在重复同一个动作 !!!】\n"
+                f"最近几步你反复执行 {act} {params}（该动作最近{state_desc}）。\n"
+                "如果动作已经生效，请立即进行下一步或 finish；"
+                "如果没生效或失败，请换一种方法，禁止继续原样重复！\n"
+                f"当前前台窗口是「{fg_window_title}」，请观察屏幕重新判断。\n\n"
+            )
+        return ""
 
     @staticmethod
     def _get_foreground_window_rect() -> Optional[tuple]:
@@ -569,6 +757,13 @@ class TaskManager:
         from desktop_gui_agent.perception.screenshot import _init_terminal_avoidance
         _init_terminal_avoidance()
 
+        # 任务开始锚点：记录终端最小化之后的前台窗口。
+        # 短暂等待最小化生效、前台窗口切换稳定后再捕获——与"运行任务先最小化
+        # 终端"功能配合，避免锚点捕获到正在最小化的终端（_capture_initial_window
+        # 内部还会兜底过滤终端，双保险）。
+        time.sleep(VERIFY_CORRECT_WAIT)
+        self._initial_window = self._capture_initial_window()
+
         logger.info(f"开始执行任务: {task}")
 
         try:
@@ -640,11 +835,12 @@ class TaskManager:
 
                 # 先取前台窗口标题（标注需要判断是否在桌面，也让模型知道当前应用）
                 fg_window_title = ""
+                fg_hwnd = None
                 try:
                     import ctypes
-                    hwnd = ctypes.windll.user32.GetForegroundWindow()
+                    fg_hwnd = ctypes.windll.user32.GetForegroundWindow()
                     buf = ctypes.create_unicode_buffer(256)
-                    ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+                    ctypes.windll.user32.GetWindowTextW(fg_hwnd, buf, 256)
                     fg_window_title = buf.value
                 except Exception:
                     pass
@@ -752,9 +948,20 @@ class TaskManager:
                 bad_marker_hint = self._bad_marker_hint
                 self._bad_marker_hint = ""  # 用后重置，避免重复
 
+                # 重复动作纠正：模型反复执行同一动作时注入打断提示，
+                # 给它跳出循环的机会（泛化修复，见 _build_repeat_hint）
+                repeat_hint = self._build_repeat_hint(history, fg_window_title)
+
+                # 任务开始锚点 / 关闭任务完成守卫 / 受保护窗口警告
+                anchor_extra = self._build_window_context_extra(
+                    task, self._initial_window, fg_window_title, fg_hwnd
+                )
+
                 marker_extra = (
                     bad_marker_hint +
                     recovery_hint +
+                    repeat_hint +
+                    anchor_extra +
                     cursor_line +
                     path_line +
                     f"【当前前台窗口】{fg_window_title}\n"

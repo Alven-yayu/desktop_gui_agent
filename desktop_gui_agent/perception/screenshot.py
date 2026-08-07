@@ -511,10 +511,19 @@ def annotate_screenshot(
             width=UIA_RECT_WIDTH,
         )
 
-        # 编号标签：贴在矩形框左上角外侧，白色文字 + 绿色底色小标签
+        # 编号标签：贴在矩形框左上角外侧，白色文字 + 绿色底色小标签。
+        # 标签上同时显示编号和控件文字（如 "30:二"），让模型在图片上直接
+        # 读到"编号=含义"，无需再跨表对照标注文字列表 → 减少猜按钮含义。
         num_str = str(marker_num)
-        label_w = 22
+        ctrl_name = ctrl.get("name", "")
+        ctrl_type = ctrl.get("control_type", "")
+        # 标签文本 = "编号:名称"；名称过长截断避免盖住相邻控件
+        name_shown = ctrl_name if ctrl_name else ctrl_type
+        if len(name_shown) > 8:
+            name_shown = name_shown[:8] + "…"
+        label_text = f"{num_str}:{name_shown}" if name_shown else num_str
         label_h = 20
+        label_w = max(24, len(label_text) * 9 + 6)
         label_x = left
         label_y = max(0, top - label_h)  # 贴在框上方
 
@@ -523,15 +532,11 @@ def annotate_screenshot(
             [label_x, label_y, label_x + label_w, label_y + label_h],
             fill=(0, 200, 83, 210),
         )
-        # 标签上编号
-        tw = len(num_str) * 7
+        # 标签上编号 + 文字
         main_draw.text(
-            (label_x + (label_w - tw) // 2, label_y + 2),
-            num_str, fill=(255, 255, 255), font=font,
+            (label_x + 3, label_y + 2),
+            label_text, fill=(255, 255, 255), font=font,
         )
-
-        ctrl_name = ctrl.get("name", "")
-        ctrl_type = ctrl.get("control_type", "")
 
         marker_map[marker_num] = {
             "source": "uia",

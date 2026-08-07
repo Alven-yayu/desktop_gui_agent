@@ -253,3 +253,15 @@ class TestAnnotateOcrClickPoint:
         _, marker_map = annotate_screenshot(img, ocr, task="", uia_controls=[])
         assert ANNOTATE_MAX_ITEMS == 30
         assert len(marker_map) == 30  # 超出的第 31 条被截断
+
+    def test_uia_marker_keeps_control_name(self):
+        """UIA 标注应保留控件文字，供模型核对"编号=含义"（防猜按钮）"""
+        from desktop_gui_agent.perception.screenshot import annotate_screenshot
+        img = Image.new("RGB", (800, 600), color=(255, 255, 255))
+        uia = [{
+            "name": "二", "control_type": "Button",
+            "bbox": (100, 100, 160, 140), "click_point": (130, 120),
+        }]
+        _, marker_map = annotate_screenshot(img, [], task="", uia_controls=uia)
+        assert marker_map[1]["source"] == "uia"
+        assert marker_map[1]["text"] == "二"

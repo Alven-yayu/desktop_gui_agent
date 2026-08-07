@@ -9,6 +9,7 @@ from unittest.mock import patch, MagicMock
 class TestKeyboardType:
     """KeyboardController.type() 测试"""
 
+    @pytest.mark.realinput  # 真实敲键会打进当前会话，默认跳过，隔离环境可 -m realinput 跑
     def test_type_ascii_text_returns_true(self):
         """纯ASCII文本输入应该返回True"""
         from desktop_gui_agent.control.keyboard_controller import KeyboardController
@@ -103,6 +104,7 @@ class TestKeyboardHotkey:
         result = kc.hotkey()
         assert result is False
 
+    @pytest.mark.realinput  # 真实 Ctrl+C 会打断当前会话，默认跳过
     def test_hotkey_ensures_keys_released(self):
         """即使操作失败，也应确保按键释放"""
         from desktop_gui_agent.control.keyboard_controller import KeyboardController
@@ -134,6 +136,7 @@ class TestKeyboardScroll:
         result = kc.scroll('left', 1)
         assert result is False
 
+    @pytest.mark.realinput  # 真实滚轮会滚动当前窗口，默认跳过
     def test_scroll_non_positive_steps(self):
         """非正步数应被调整为正数"""
         from desktop_gui_agent.control.keyboard_controller import KeyboardController

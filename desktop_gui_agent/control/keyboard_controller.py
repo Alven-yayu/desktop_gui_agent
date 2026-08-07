@@ -142,8 +142,13 @@ class KeyboardController:
             return True
 
         try:
-            # 一律走剪贴板粘贴，避免 pynput 逐字符输入在中文键盘布局下丢字符
-            self._type_via_clipboard(text)
+            if text.isascii():
+                # 纯 ASCII 用 pynput 直接键入：不丢字符，且不会因剪贴板
+                # 恢复时机问题在部分应用（如计算器）丢末尾字符。
+                self._type_ascii(text)
+            else:
+                # 含中文等非 ASCII → 剪贴板粘贴（pynput 无法逐字键入中文）
+                self._type_via_clipboard(text)
             logger.debug(f"文本输入成功，长度={len(text)}")
             return True
         except Exception as e:
@@ -269,12 +274,14 @@ class KeyboardController:
     def _type_ascii(self, text: str) -> None:
         """输入纯 ASCII 文本。
 
-        pynput Controller.type() 自动处理 Shift/AltGr 修饰键，
-        比逐字符 press/release 更可靠。
+        逐字符键入并加间隔：某些应用（如计算器）在处理运算符（+、-、*）后
+        需要时间切换状态，紧接的下一个字符会被吞掉。pynput 一次性 type(text)
+        过快会丢末尾字符，逐字符加间隔可避免。
         """
-        # 使用 pynput 内置 type，它内部处理所有按键映射
-        self._keyboard.type(text)
-        time.sleep(0.05 * len(text))  # 等待输入完成
+        for ch in text:
+            # pynput type() 自动处理 Shift/AltGr 修饰键（如 "+" 需 Shift+=）
+            self._keyboard.type(ch)
+            time.sleep(0.1)  # 每字符间隔，给应用处理时间
 
     def _type_via_clipboard(self, text: str) -> None:
         """通过剪贴板粘贴输入中文文本。

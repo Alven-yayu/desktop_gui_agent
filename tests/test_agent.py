@@ -517,16 +517,11 @@ class TestModelClientQuery:
         from desktop_gui_agent.utils.exceptions import ModelError
         mock_post.side_effect = Exception("网络错误")
 
-        old_flag = config.TWO_STAGE_ENABLED
-        config.TWO_STAGE_ENABLED = False
-        try:
-            client = ModelClient(mode="api", api_url="http://test:8080/v1")
-            with pytest.raises(ModelError):
-                client.query(sample_screenshot, "测试任务")
-            # 应该调用了两次（原始 + 重试）
-            assert mock_post.call_count == 2
-        finally:
-            config.TWO_STAGE_ENABLED = old_flag
+        client = ModelClient(mode="api", api_url="http://test:8080/v1")
+        with pytest.raises(ModelError):
+            client.query(sample_screenshot, "测试任务")
+        # 应该调用了两次（原始 + 重试）
+        assert mock_post.call_count == 2
 
     def test_query_with_none_image(self, sample_screenshot):
         """None 截图应抛 ModelError"""
@@ -1493,6 +1488,196 @@ class TestTaskManagerRun:
         assert result["steps"] == 1  # 第一步就终止
 
 
+# ===== 关闭当前窗口任务守卫测试 =====
+
+class TestCloseWindowGuard:
+    """"关闭当前窗口"任务锚点/完成守卫/受保护窗口测试。
+
+    背景：真实测试中 agent 把"当前窗口"当活变量，关完一个又关下一个，
+    甚至把终端（Claude Code）也关了且不 finish。修复 = 任务开始锚点 +
+    代码级完成守卫 + 受保护窗口安全警告。
+    """
+
+    def test_is_close_window_task_matches_keywords(self):
+        """含"关闭当前窗口"类关键词的任务应被识别为关闭任务"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        for task in ("关闭当前窗口", "帮我关闭当前窗口", "关闭当前应用",
+                     "请关闭当前窗口", "关闭窗口", "关掉当前窗口"):
+            assert TaskManager._is_close_window_task(task), task
+
+    def test_is_close_window_task_ignores_unrelated(self):
+        """无关任务不应被误判为关闭任务"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        for task in ("打开计算器并计算1+1", "清空回收站", "下载图片保存到桌面",
+                     "打开记事本输入Hello World"):
+            assert not TaskManager._is_close_window_task(task), task
+
+    def _make_run(self, task, initial_window, alive):
+        """运行一次 mock 任务循环，返回注入模型的 extra_text。
+
+        统一 mock 掉截图/OCR/睡眠，并 patch 初始窗口锚点与存活判断，
+        使测试与真实屏幕/win32 状态无关。
+        """
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        mock_model = MagicMock()
+        mock_model.query.return_value = 'finish(result="done")'
+        mock_mouse = MagicMock()
+        mock_keyboard = MagicMock()
+
+        with patch("desktop_gui_agent.agent.task_manager.capture") as mock_capture, \
+             patch("desktop_gui_agent.agent.task_manager.recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"), \
+             patch.object(TaskManager, "_capture_initial_window",
+                          return_value=initial_window), \
+             patch.object(TaskManager, "_window_alive", return_value=alive):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+            )
+            tm.run(task)
+
+        return mock_model.query.call_args.kwargs.get("extra_text", "")
+
+    def test_run_injects_initial_window_anchor(self):
+        """每步应注入任务开始时的前台窗口作为参照锚点"""
+        extra = self._make_run(
+            "关闭当前窗口",
+            {"title": "无标题 - Notepad", "hwnd": 123, "is_terminal": False},
+            alive=True,
+        )
+        assert "【任务开始时的前台窗口】无标题 - Notepad" in extra
+
+    def test_run_injects_completion_hint_when_target_closed(self):
+        """初始窗口已消失 → 注入"目标已关闭、立即 finish"提示"""
+        extra = self._make_run(
+            "关闭当前窗口",
+            {"title": "无标题 - Notepad", "hwnd": 123, "is_terminal": False},
+            alive=False,
+        )
+        assert "【!!! 目标窗口已关闭 — 任务完成 !!!】" in extra
+        assert "finish" in extra
+
+    def test_run_no_completion_hint_when_target_alive(self):
+        """初始窗口还在 → 不注入完成提示"""
+        extra = self._make_run(
+            "关闭当前窗口",
+            {"title": "无标题 - Notepad", "hwnd": 123, "is_terminal": False},
+            alive=True,
+        )
+        assert "目标窗口已关闭" not in extra
+
+    def test_run_no_completion_hint_for_non_close_task(self):
+        """非关闭任务即使初始窗口消失，也不应误报任务完成"""
+        extra = self._make_run(
+            "打开记事本输入Hello World",
+            {"title": "无标题 - Notepad", "hwnd": 123, "is_terminal": False},
+            alive=False,
+        )
+        assert "目标窗口已关闭" not in extra
+
+    def test_run_injects_terminal_safety_warning(self):
+        """当前前台是终端窗口时注入安全警告（防止误关 Claude Code）"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        mock_model = MagicMock()
+        mock_model.query.return_value = 'finish(result="done")'
+        mock_mouse = MagicMock()
+        mock_keyboard = MagicMock()
+
+        with patch("desktop_gui_agent.agent.task_manager.capture") as mock_capture, \
+             patch("desktop_gui_agent.agent.task_manager.recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"), \
+             patch.object(TaskManager, "_capture_initial_window",
+                          return_value={"title": "无标题 - Notepad",
+                                        "hwnd": 123, "is_terminal": False}), \
+             patch.object(TaskManager, "_window_alive", return_value=True), \
+             patch("desktop_gui_agent.agent.task_manager._is_terminal_window",
+                   return_value=True):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+            )
+            tm.run("关闭当前窗口")
+
+        extra = mock_model.query.call_args.kwargs.get("extra_text", "")
+        assert "【!!! 安全警告 — 当前前台是终端/命令提示符窗口 !!!】" in extra
+
+    def test_no_anchor_no_hint_when_initial_is_terminal(self):
+        """锚点不可用（前台是终端被过滤）时，不注入矛盾锚点、不误报完成。
+
+        与"运行任务先最小化终端"配合：最小化把终端移开后锚点才有效；
+        若仍捕获到终端（_capture_initial_window 返回 {}），守卫安全降级。
+        """
+        extra = self._make_run("关闭当前窗口", {}, alive=False)
+        assert "任务开始时的前台窗口" not in extra
+        assert "目标窗口已关闭" not in extra
+
+
+# ===== 重复动作纠正提示测试 =====
+
+class TestRepeatHint:
+    """重复动作纠正提示（泛化修复死循环）"""
+
+    @staticmethod
+    def _hint(history):
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        return TaskManager._build_repeat_hint(history, "无标题 - Notepad")
+
+    def test_no_history_no_hint(self):
+        assert self._hint([]) == ""
+        assert self._hint([{"action_type": "hotkey", "action_params": {"keys": ["win"]}, "success": True}]) == ""
+
+    def test_consecutive_repeat_fires_hint(self):
+        h = [
+            {"action_type": "hotkey", "action_params": {"keys": ["win"]}, "success": True},
+            {"action_type": "hotkey", "action_params": {"keys": ["win"]}, "success": True},
+        ]
+        assert "正在重复同一个动作" in self._hint(h)
+
+    def test_alternating_loop_fires_hint(self):
+        """交替循环（click → drag → click → drag）也会触发重复提示"""
+        h = [
+            {"action_type": "click_marker", "action_params": {"marker": 14}, "success": True},
+            {"action_type": "drag_marker", "action_params": {"from": 20, "to": 2814}, "success": False},
+            {"action_type": "click_marker", "action_params": {"marker": 14}, "success": True},
+            {"action_type": "drag_marker", "action_params": {"from": 20, "to": 2814}, "success": False},
+        ]
+        hint = self._hint(h)
+        assert "正在重复同一个动作" in hint
+        # 提示应提到被重复的具体动作（click 或 drag 之一，取决于遍历顺序）
+        assert ("click_marker" in hint) or ("drag_marker" in hint)
+
+    def test_failed_repeat_mentions_failure(self):
+        h = [
+            {"action_type": "drag_marker", "action_params": {"from": 20, "to": 2814}, "success": False},
+            {"action_type": "click_marker", "action_params": {"marker": 14}, "success": True},
+            {"action_type": "drag_marker", "action_params": {"from": 20, "to": 2814}, "success": False},
+        ]
+        assert "执行失败" in self._hint(h)
+
+    def test_normal_sequence_no_hint(self):
+        """正常任务序列（win→type→enter）不应触发"""
+        h = [
+            {"action_type": "hotkey", "action_params": {"keys": ["win"]}, "success": True},
+            {"action_type": "type", "action_params": {"text": "计算器"}, "success": True},
+            {"action_type": "hotkey", "action_params": {"keys": ["enter"]}, "success": True},
+        ]
+        assert self._hint(h) == ""
+
+
 # ===== Main 入口测试 =====
 
 class TestMain:
@@ -1635,11 +1820,12 @@ class TestPromptBuilding:
         assert "【点击标注" in system_content
         assert "计算器" in system_content
 
-    def test_prompt_has_common_scenario_strategies(self):
-        """PROMPT_SYSTEM 应包含常见场景策略（文件对话框/复制粘贴/右键菜单）"""
+    def test_prompt_has_general_framework(self):
+        """PROMPT 应包含通用决策框架（四步SOP + 动作选型）而非任务脚本"""
         import desktop_gui_agent.config as config
-        assert "常见场景策略" in config.PROMPT_SYSTEM
-        assert "hotkey(ctrl, l)" in config.PROMPT_SYSTEM  # 文件对话框地址栏
+        assert "四步SOP" in config.PROMPT_SYSTEM
+        assert "动作选型" in config.PROMPT_SYSTEM
+        assert "hotkey(ctrl, l)" in config.PROMPT_SYSTEM  # 文件对话框地址栏导航
         assert "Alt+Tab" in config.PROMPT_SYSTEM  # 应用切换
 
     def test_prompt_action_table_has_new_actions(self):
@@ -1649,15 +1835,15 @@ class TestPromptBuilding:
         assert "drag_marker" in config.PROMPT_SYSTEM
         assert "press(key=" in config.PROMPT_SYSTEM
 
-    def test_few_shot_has_medium_scenarios(self):
-        """few-shot 应包含右键/拖拽/保存对话框等中等任务场景"""
+    def test_few_shot_single_step_by_action_type(self):
+        """few-shot 应按动作类型提供单步样例（点击/输入/滚动/搜索/完成）"""
         import desktop_gui_agent.config as config
         joined = "\n".join(config.PROMPT_FEW_SHOT_EXAMPLES)
-        assert "right_click_marker" in joined      # 右键菜单
-        assert "drag_marker" in joined             # 拖拽选文本
-        assert "hotkey(ctrl, c)" in joined         # 跨应用复制
-        assert "hotkey(ctrl, l)" in joined         # 保存对话框
-        assert "press(key=\"tab\")" in joined      # 单键切换焦点
+        assert "点击标注" in joined                # 点击
+        assert "type(text=" in joined              # 输入
+        assert "scroll(" in joined                 # 滚动
+        assert "hotkey(win)" in joined             # 搜索兜底
+        assert "finish(result=" in joined          # 任务完成
 
     def test_prompt_has_keyboard_first_principle(self):
         """PROMPT 应包含键盘优先原则（模型最可靠的路径）"""
@@ -1667,18 +1853,16 @@ class TestPromptBuilding:
         assert "hotkey(alt, f4)" in config.PROMPT_SYSTEM  # 关闭窗口
         assert "click_marker" in config.PROMPT_SYSTEM     # 鼠标用于大按钮
 
-    def test_prompt_has_file_dialog_hard_rules(self):
-        """PROMPT 应包含文件对话框硬规则（Ctrl+S → Ctrl+L → 路径）"""
+    def test_prompt_has_file_dialog_principles(self):
+        """PROMPT 应包含文件对话框导航原则（Ctrl+S 打开 / Ctrl+L 地址栏）"""
         import desktop_gui_agent.config as config
-        assert "文件对话框硬规则" in config.PROMPT_SYSTEM
         assert "hotkey(ctrl, s)" in config.PROMPT_SYSTEM  # 打开保存框
         assert "hotkey(ctrl, l)" in config.PROMPT_SYSTEM  # 地址栏
 
-    def test_prompt_has_shortcut_hard_rules(self):
-        """PROMPT 应包含快捷键硬规则（任务里的快捷键转 hotkey）"""
+    def test_prompt_has_shortcut_principle(self):
+        """PROMPT 应包含快捷键转 hotkey 的原则"""
         import desktop_gui_agent.config as config
-        assert "快捷键硬规则" in config.PROMPT_SYSTEM
-        assert "hotkey(alt, f4)" in config.PROMPT_SYSTEM
+        assert "hotkey(alt, f4)" in config.PROMPT_SYSTEM  # 关闭窗口
         assert "hotkey(ctrl, v)" in config.PROMPT_SYSTEM  # 粘贴
 
     @patch('desktop_gui_agent.agent.model_client.process_vision_info')
@@ -1689,31 +1873,26 @@ class TestPromptBuilding:
         from desktop_gui_agent.agent.model_client import ModelClient
         from PIL import Image
 
-        old_flag = config.TWO_STAGE_ENABLED
-        config.TWO_STAGE_ENABLED = False
-        try:
-            mock_model = MagicMock()
-            mock_model.device = "cpu"
-            mock_processor = MagicMock()
-            mock_processor.apply_chat_template.return_value = "chat template"
-            mock_processor.batch_decode.return_value = ["finish(result=\"ok\")"]
-            mock_load.return_value = (mock_model, mock_processor)
-            mock_pvi.return_value = ([], [])
+        mock_model = MagicMock()
+        mock_model.device = "cpu"
+        mock_processor = MagicMock()
+        mock_processor.apply_chat_template.return_value = "chat template"
+        mock_processor.batch_decode.return_value = ["finish(result=\"ok\")"]
+        mock_load.return_value = (mock_model, mock_processor)
+        mock_pvi.return_value = ([], [])
 
-            client = ModelClient(mode="local")
-            client.query(Image.new("RGB", (100, 100)), "测试")
+        client = ModelClient(mode="local")
+        client.query(Image.new("RGB", (100, 100)), "测试")
 
-            call_args = mock_processor.apply_chat_template.call_args
-            messages = call_args[0][0]
-            user_text = ""
-            for msg in messages:
-                if msg["role"] == "user":
-                    for item in msg["content"]:
-                        if item["type"] == "text":
-                            user_text += item["text"]
-            assert "按格式输出" in user_text
-        finally:
-            config.TWO_STAGE_ENABLED = old_flag
+        call_args = mock_processor.apply_chat_template.call_args
+        messages = call_args[0][0]
+        user_text = ""
+        for msg in messages:
+            if msg["role"] == "user":
+                for item in msg["content"]:
+                    if item["type"] == "text":
+                        user_text += item["text"]
+        assert "按格式输出" in user_text
 
     @patch('desktop_gui_agent.agent.model_client.process_vision_info')
     @patch('desktop_gui_agent.agent.model_client._load_local_model')
@@ -1776,205 +1955,6 @@ class TestPromptBuilding:
             config.PROMPT_FEW_SHOT_EXAMPLES = old_examples
 
 
-# ===== 双层 AI 架构测试（Phase 6）=====
-
-class TestTwoStage:
-    """ModelClient 双层推理（判断层 + 执行层）测试"""
-
-    # ---- 配置检查 ----
-
-    def test_two_stage_config_defaults(self):
-        """双层架构配置项应存在（默认关闭，7B API 单层推理已覆盖判断+执行）"""
-        import desktop_gui_agent.config as config
-        assert config.TWO_STAGE_ENABLED is False  # Phase 5: 7B API 单层够用
-        assert isinstance(config.MODEL_NAME_JUDGE, str)
-        assert config.MODEL_MODE_JUDGE in ("local", "api")
-        assert isinstance(config.PROMPT_JUDGE_SYSTEM, str)
-        assert "【输出格式】" in config.PROMPT_JUDGE_SYSTEM
-        assert isinstance(config.PROMPT_JUDGE_USER, str)
-
-    def test_two_stage_disabled_calls_single(self):
-        """TWO_STAGE_ENABLED=False 时应走单层推理"""
-        import desktop_gui_agent.config as config
-        from unittest.mock import MagicMock, patch
-        from PIL import Image
-
-        old_flag = config.TWO_STAGE_ENABLED
-        config.TWO_STAGE_ENABLED = False
-        try:
-            with patch('desktop_gui_agent.agent.model_client.process_vision_info') as mock_pvi, \
-                 patch('desktop_gui_agent.agent.model_client._load_local_model') as mock_load:
-                mock_pvi.return_value = ([], [])
-                mock_model = MagicMock()
-                mock_model.device = "cpu"
-                mock_processor = MagicMock()
-                mock_processor.apply_chat_template.return_value = "chat"
-                mock_processor.batch_decode.return_value = ["click(x=10, y=20)"]
-                mock_load.return_value = (mock_model, mock_processor)
-
-                from desktop_gui_agent.agent.model_client import ModelClient
-                client = ModelClient(mode="local")
-                result = client.query(Image.new("RGB", (100, 100)), "测试")
-                assert result == "click(x=10, y=20)"  # 单层直接输出动作
-        finally:
-            config.TWO_STAGE_ENABLED = old_flag
-
-    # ---- 判断层 prompt 构建 ----
-
-    def test_judge_system_prompt_format(self):
-        """判断层系统提示词应包含输出格式要求和核心原则"""
-        import desktop_gui_agent.config as config
-        assert "状态：" in config.PROMPT_JUDGE_SYSTEM
-        assert "目标：" in config.PROMPT_JUDGE_SYSTEM
-        assert "策略：" in config.PROMPT_JUDGE_SYSTEM
-        assert "找不到就别瞎点" in config.PROMPT_JUDGE_SYSTEM
-        assert "Win键搜索" in config.PROMPT_JUDGE_SYSTEM
-
-    def test_judge_user_prompt_has_task_placeholder(self):
-        """判断层用户提示词模板应包含 {task} 占位符"""
-        import desktop_gui_agent.config as config
-        assert "{task}" in config.PROMPT_JUDGE_USER
-
-    # ---- 双层流程 mock ----
-
-    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
-    @patch('desktop_gui_agent.agent.model_client._load_local_model')
-    def test_two_stage_flow_calls_judge_then_executor(self, mock_load, mock_pvi):
-        """双层模式下应先调判断层再调执行层"""
-        import desktop_gui_agent.config as config
-        from unittest.mock import MagicMock
-        from PIL import Image
-
-        old_flag = config.TWO_STAGE_ENABLED
-        config.TWO_STAGE_ENABLED = True
-        try:
-            mock_pvi.return_value = ([], [])
-            mock_model = MagicMock()
-            mock_model.device = "cpu"
-            mock_processor = MagicMock()
-            mock_processor.apply_chat_template.return_value = "chat"
-            # 两次 batch_decode: 第一次是 judge, 第二次是 executor
-            mock_processor.batch_decode.side_effect = [
-                ["状态：桌面可见\n目标：打开计算器\n策略：按Win键"],
-                ["hotkey(win)"],
-            ]
-            mock_load.return_value = (mock_model, mock_processor)
-
-            from desktop_gui_agent.agent.model_client import ModelClient
-            client = ModelClient(
-                mode="local",
-                judge_mode="local",  # 用本地 mock 测试双层流程
-            )
-            result = client.query(Image.new("RGB", (100, 100)), "打开计算器")
-            # executor 输出作为最终结果
-            assert result == "hotkey(win)"
-            # batch_decode 被调用了 2 次（judge + executor）
-            assert mock_processor.batch_decode.call_count == 2
-        finally:
-            config.TWO_STAGE_ENABLED = old_flag
-
-    # ---- 降级逻辑 ----
-
-    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
-    @patch('desktop_gui_agent.agent.model_client._load_local_model')
-    def test_two_stage_degradation_on_judge_failure(self, mock_load, mock_pvi):
-        """判断层失败时应自动降级为单层模式"""
-        import desktop_gui_agent.config as config
-        from unittest.mock import MagicMock
-        from PIL import Image
-
-        old_flag = config.TWO_STAGE_ENABLED
-        config.TWO_STAGE_ENABLED = True
-        try:
-            mock_pvi.return_value = ([], [])
-            mock_model = MagicMock()
-            mock_model.device = "cpu"
-            mock_processor = MagicMock()
-            mock_processor.apply_chat_template.return_value = "chat"
-            # 第一次 batch_decode（judge）抛异常 → 降级
-            # 第二次 batch_decode（单层 executor）返回结果
-            mock_processor.batch_decode.side_effect = [
-                Exception("Judge model OOM"),
-                ["click(x=100, y=200)"],
-            ]
-            mock_load.return_value = (mock_model, mock_processor)
-
-            from desktop_gui_agent.agent.model_client import ModelClient
-            client = ModelClient(
-                mode="local",
-                judge_mode="local",
-            )
-            result = client.query(Image.new("RGB", (100, 100)), "测试")
-            # 降级后应返回单层推理的结果
-            assert result == "click(x=100, y=200)"
-        finally:
-            config.TWO_STAGE_ENABLED = old_flag
-
-    # ---- 执行层 prompt 验证 ----
-
-    @patch('desktop_gui_agent.agent.model_client.process_vision_info')
-    @patch('desktop_gui_agent.agent.model_client._load_local_model')
-    def test_executor_receives_judge_analysis(self, mock_load, mock_pvi):
-        """执行层 prompt 应包含判断层的分析结果"""
-        import desktop_gui_agent.config as config
-        from unittest.mock import MagicMock
-        from PIL import Image
-
-        old_flag = config.TWO_STAGE_ENABLED
-        config.TWO_STAGE_ENABLED = True
-        try:
-            mock_pvi.return_value = ([], [])
-
-            # 两个独立的 processor mock（judge 和 executor 共享同一个 mock）
-            mock_processor = MagicMock()
-            mock_processor.apply_chat_template.return_value = "chat"
-            judge_output = "状态：桌面可见\n目标：打开计算器\n策略：按Win键"
-            mock_processor.batch_decode.side_effect = [
-                [judge_output],
-                ["hotkey(win)"],
-            ]
-
-            mock_model = MagicMock()
-            mock_model.device = "cpu"
-            mock_load.return_value = (mock_model, mock_processor)
-
-            from desktop_gui_agent.agent.model_client import ModelClient
-            client = ModelClient(mode="local", judge_mode="local")
-            client.query(Image.new("RGB", (100, 100)), "打开计算器")
-
-            # 第二次 apply_chat_template 调用是 executor 的
-            # 其 user prompt 应包含判断层的分析
-            calls = mock_processor.apply_chat_template.call_args_list
-            assert len(calls) >= 2
-            # executor call (second)
-            executor_messages = calls[1][0][0]
-            user_text = ""
-            for msg in executor_messages:
-                if msg["role"] == "user":
-                    for item in msg["content"]:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            user_text += item["text"]
-            assert "状态：桌面可见" in user_text
-            assert "打开计算器" in user_text
-        finally:
-            config.TWO_STAGE_ENABLED = old_flag
-
-    # ---- init 参数 ----
-
-    def test_init_accepts_judge_params(self):
-        """ModelClient 初始化应接受 judge 相关参数"""
-        from desktop_gui_agent.agent.model_client import ModelClient
-        client = ModelClient(
-            mode="api",
-            judge_mode="api",
-            judge_model_name="Qwen/Qwen2-VL-7B-Instruct",
-            judge_api_url="http://localhost:11434/v1",
-        )
-        assert client.judge_mode == "api"
-        assert client.judge_model_name == "Qwen/Qwen2-VL-7B-Instruct"
-        assert client.judge_api_url == "http://localhost:11434/v1"
-
-
 # ===== API 预设测试 =====
 
 class TestApiPreset:
@@ -1985,7 +1965,7 @@ class TestApiPreset:
         from desktop_gui_agent.agent.model_client import _resolve_api_preset
         result = _resolve_api_preset("dashscope")
         assert result["mode"] == "api"
-        assert result["model_name"] == "qwen-vl-plus"
+        assert result["model_name"] == "qwen-vl-max"
         assert "dashscope.aliyuncs.com" in result["api_url"]
         assert "api_key" in result
 
@@ -2016,7 +1996,7 @@ class TestApiPreset:
         from desktop_gui_agent.agent.model_client import ModelClient
         client = ModelClient(api_preset="dashscope")
         assert client.mode == "api"
-        assert "qwen-vl-plus" == client.model_name
+        assert "qwen-vl-max" == client.model_name
         assert "dashscope" in client.api_url
 
     def test_api_preset_overrides_mode(self):

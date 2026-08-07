@@ -26,11 +26,6 @@ import desktop_gui_agent.config as _config
 from desktop_gui_agent.utils.exceptions import ModelError
 from desktop_gui_agent.utils.logger import get_logger
 
-# ===== 双层 AI 架构常量 =====
-# 判断层和执行层分开，脑子管策略，手管精确坐标
-_EXECUTOR_MAX_TOKENS = 128  # 执行层输出极短（只需一个动作），防止长篇生成卡住
-_JUDGE_MAX_TOKENS = _config.MODEL_MAX_TOKENS_JUDGE  # 判断层输出更短
-
 
 def _resolve_api_preset(preset: Optional[str]) -> dict:
     """根据预设名称解析 API 配置。
@@ -100,11 +95,6 @@ class ModelClient:
         model_name: Optional[str] = None,
         api_url: Optional[str] = None,
         api_key: Optional[str] = None,
-        # 判断层参数（双层架构）
-        judge_mode: Optional[str] = None,
-        judge_model_name: Optional[str] = None,
-        judge_api_url: Optional[str] = None,
-        judge_api_key: Optional[str] = None,
         # API 预设（一键切换）
         api_preset: Optional[str] = None,
     ):
@@ -112,13 +102,9 @@ class ModelClient:
 
         Args:
             mode: 推理模式，"local" 或 "api"。
-            model_name: 模型名称，None 则使用 config.MODEL_NAME（执行层）。
-            api_url: API 端点，None 则使用 config.MODEL_API_URL（执行层）。
-            api_key: API 密钥，None 则使用 config.MODEL_API_KEY（执行层）。
-            judge_mode: 判断层推理模式，None 则使用 config.MODEL_MODE_JUDGE。
-            judge_model_name: 判断层模型，None 则使用 config.MODEL_NAME_JUDGE。
-            judge_api_url: 判断层 API 端点，None 则使用 config.MODEL_API_URL_JUDGE。
-            judge_api_key: 判断层 API 密钥，None 则使用 config.MODEL_API_KEY_JUDGE。
+            model_name: 模型名称，None 则使用 config.MODEL_NAME。
+            api_url: API 端点，None 则使用 config.MODEL_API_URL。
+            api_key: API 密钥，None 则使用 config.MODEL_API_KEY。
             api_preset: API 预设名称（"dashscope" / "ollama"），
                         自动解析 mode/model_name/api_url/api_key。
                         None 则使用默认 config 值。
@@ -145,19 +131,7 @@ class ModelClient:
         self._model = None
         self._processor = None
 
-        # 判断层配置
-        self.judge_mode = judge_mode or _config.MODEL_MODE_JUDGE
-        self.judge_model_name = judge_model_name or _config.MODEL_NAME_JUDGE
-        self.judge_api_url = judge_api_url or _config.MODEL_API_URL_JUDGE
-        self.judge_api_key = judge_api_key or _config.MODEL_API_KEY_JUDGE
-        self._judge_model = None
-        self._judge_processor = None
-
         logger.info(f"ModelClient 初始化，模式: {self.mode}，模型: {self.model_name}")
-        if _config.TWO_STAGE_ENABLED:
-            logger.info(
-                f"双层架构已启用，判断层: {self.judge_model_name} ({self.judge_mode})"
-            )
 
     # 模型输入图片最大边长（像素），超过则等比缩放
     # 2B 模型在 8GB 显存下安全值，过大易 OOM
@@ -349,10 +323,7 @@ class ModelClient:
     ) -> str:
         """向模型发送截图和任务，返回模型响应。
 
-        双层架构（TWO_STAGE_ENABLED=True）：
-          判断层(7B)分析屏幕→制定策略 → 执行层(2B)根据策略+OCR坐标输出精确动作。
-        单层架构（TWO_STAGE_ENABLED=False）：
-          直接由执行层模型一步完成理解和动作输出。
+        单层架构：由模型一步完成屏幕理解和动作输出（双层判断层已废弃删除）。
 
         Args:
             image: 当前屏幕截图 (PIL.Image)。
@@ -376,69 +347,15 @@ class ModelClient:
         )
         image = self._resize_image(image, max_size=max_size)
 
-        # 尝试双层架构
-        if _config.TWO_STAGE_ENABLED:
-            try:
-                return self._query_two_stage(image, task, context, ocr_results)
-            except Exception as e:
-                logger.warning(
-                    f"双层推理失败，降级为单层模式: {e}"
-                )
-                # 降级为单层，继续执行
-
-        # 单层模式（默认/降级）
+        # 单层推理
         return self._query_single(image, task, context, ocr_results, extra_text)
-
-    def _query_two_stage(
-        self, image: Image.Image, task: str,
-        context: list, ocr_results: list,
-    ) -> str:
-        """双层推理：判断层分析 + 执行层精确动作。"""
-        # === Stage 1: 判断层（脑子）—— 只看文字OCR，不懂坐标 ===
-        judge_prompt = _config.PROMPT_JUDGE_USER.format(task=task)
-        if context:
-            history = "\n".join(
-                f"  步骤{i+1}: {act}" for i, act in enumerate(context)
-            )
-            judge_prompt += f"\n已完成步骤：\n{history}"
-        # 判断层只给文字列表（不含坐标），聚焦语义理解
-        if ocr_results:
-            judge_prompt += self._build_ocr_text(ocr_results, include_coords=False, task=task)
-
-        logger.info("【判断层】开始分析…")
-        judge_output = self._query_judge(image, judge_prompt)
-        logger.info(f"【判断层】输出: {judge_output[:120]}")
-
-        # 判断层输出过长时截断（防止垃圾文本污染执行层）
-        if len(judge_output) > 300:
-            logger.warning(f"判断层输出过长({len(judge_output)}字符)，截断至300字符")
-            judge_output = judge_output[:300]
-
-        # === Stage 2: 执行层（手）—— 大脑分析 + OCR坐标 → 精确动作 ===
-        executor_prompt = _config.PROMPT_USER_TEMPLATE.format(task=task)
-        # 注入判断层分析
-        executor_prompt += (
-            f"\n\n【大脑分析】\n{judge_output}"
-            f"\n\n请根据以上分析，结合OCR坐标，输出下一步精确动作（只输出动作本身即可）。"
-        )
-        if context:
-            history = "\n".join(
-                f"  步骤{i+1}: {act}" for i, act in enumerate(context)
-            )
-            executor_prompt += f"\n已完成步骤：\n{history}"
-        if ocr_results:
-            executor_prompt += self._build_ocr_text(ocr_results, include_coords=True, task=task)
-            executor_prompt += "\n请使用OCR提供的坐标来精确点击目标，不要自己猜测坐标。"
-
-        logger.info("【执行层】根据大脑分析生成精确动作…")
-        return self._query_executor(image, executor_prompt)
 
     def _query_single(
         self, image: Image.Image, task: str,
         context: list, ocr_results: list,
         extra_text: str = "",
     ) -> str:
-        """单层推理（原逻辑，兼容 TWO_STAGE_ENABLED=False）。"""
+        """单层推理：一步完成理解和动作输出。"""
         user_prompt = self._build_user_prompt(task, context, ocr_results, extra_text=extra_text)
 
         if self.mode == "local":
@@ -446,47 +363,6 @@ class ModelClient:
         else:
             return self._query_api(image, user_prompt, self.model_name,
                                    self.api_url, self.api_key, MODEL_MAX_TOKENS)
-
-    # ===== 判断层推理 =====
-
-    def _query_judge(self, image: Image.Image, user_prompt: str) -> str:
-        """调用判断层模型（7B），返回自由文本策略分析。"""
-        if self.judge_mode == "local":
-            return self._query_local(
-                image=image,
-                user_prompt=user_prompt,
-                model_name=self.judge_model_name,
-                max_tokens=_JUDGE_MAX_TOKENS,
-                system_prompt=_config.PROMPT_JUDGE_SYSTEM,
-            )
-        else:
-            return self._query_api(
-                image=image,
-                user_prompt=user_prompt,
-                model_name=self.judge_model_name,
-                api_url=self.judge_api_url,
-                api_key=self.judge_api_key,
-                max_tokens=_JUDGE_MAX_TOKENS,
-                system_prompt=_config.PROMPT_JUDGE_SYSTEM,
-            )
-
-    # ===== 执行层推理 =====
-
-    def _query_executor(self, image: Image.Image, user_prompt: str) -> str:
-        """调用执行层模型（2B），根据 judge 分析 + OCR 坐标输出精确动作。"""
-        if self.mode == "local":
-            return self._query_local(
-                image=image, user_prompt=user_prompt,
-                model_name=self.model_name,
-                max_tokens=_EXECUTOR_MAX_TOKENS,
-            )
-        else:
-            return self._query_api(
-                image=image, user_prompt=user_prompt,
-                model_name=self.model_name,
-                api_url=self.api_url, api_key=self.api_key,
-                max_tokens=_EXECUTOR_MAX_TOKENS,
-            )
 
     # ===== 本地推理 =====
 
@@ -507,30 +383,13 @@ class ModelClient:
         """
         model_name = model_name or self.model_name
         max_tokens = max_tokens or MODEL_MAX_TOKENS
-        is_judge = system_prompt is not None
 
-        # 判断层和执行层可能用不同模型
-        # 如果模型名相同，复用同一个实例（节省显存）
-        if is_judge:
-            if model_name == self.model_name and self._model is not None:
-                # 同模型复用（执行层先加载的场景）
-                model, processor = self._model, self._processor
-            elif self._judge_model is not None:
-                model, processor = self._judge_model, self._judge_processor
-            else:
-                self._judge_model, self._judge_processor = _load_local_model(model_name)
-                model, processor = self._judge_model, self._judge_processor
-                # 模型名相同 → 执行层也指向同一实例，避免重复加载
-                if model_name == self.model_name:
-                    self._model, self._processor = self._judge_model, self._judge_processor
-        elif self._model is not None:
+        # 模型实例懒加载并缓存复用（同模型只加载一次）
+        if self._model is not None:
             model, processor = self._model, self._processor
         else:
             self._model, self._processor = _load_local_model(model_name)
             model, processor = self._model, self._processor
-            # 模型名相同 → 判断层也指向同一实例
-            if model_name == self.judge_model_name:
-                self._judge_model, self._judge_processor = self._model, self._processor
 
         try:
             system_content = system_prompt or self._build_system_prompt()
@@ -582,9 +441,8 @@ class ModelClient:
                 clean_up_tokenization_spaces=False,
             )[0]
 
-            label = "判断层" if is_judge else "本地"
             logger.info(
-                f"{label}推理完成，耗时 {elapsed:.2f}s，输出: {output_text[:80]}"
+                f"本地推理完成，耗时 {elapsed:.2f}s，输出: {output_text[:80]}"
             )
             return output_text.strip()
 
