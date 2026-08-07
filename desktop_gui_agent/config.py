@@ -65,9 +65,9 @@ MODEL_GPU_MEMORY_GB = None  # 显存上限（GB），设为具体值则覆盖比
 API_PRESETS = {
     "dashscope": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model": "qwen-vl-max",
+        "model": "qwen-vl-plus",
         "api_key_env": "DASHSCOPE_API_KEY",
-        "description": "阿里云灵积 DashScope（千问最强视觉模型，100w token 免费额度）",
+        "description": "阿里云灵积 DashScope（千问视觉模型 qwen-vl-plus）",
     },
     "ollama": {
         "base_url": "http://localhost:11434/v1",

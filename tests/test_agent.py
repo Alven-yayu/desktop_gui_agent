@@ -1871,7 +1871,7 @@ class TestApiPreset:
         from desktop_gui_agent.agent.model_client import _resolve_api_preset
         result = _resolve_api_preset("dashscope")
         assert result["mode"] == "api"
-        assert result["model_name"] == "qwen-vl-max"
+        assert result["model_name"] == "qwen-vl-plus"
         assert "dashscope.aliyuncs.com" in result["api_url"]
         assert "api_key" in result
 
@@ -1902,7 +1902,7 @@ class TestApiPreset:
         from desktop_gui_agent.agent.model_client import ModelClient
         client = ModelClient(api_preset="dashscope")
         assert client.mode == "api"
-        assert "qwen-vl-max" == client.model_name
+        assert "qwen-vl-plus" == client.model_name
         assert "dashscope" in client.api_url
 
     def test_api_preset_overrides_mode(self):
