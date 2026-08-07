@@ -15,7 +15,11 @@ from PIL import Image
 
 from desktop_gui_agent.agent.action_parser import parse
 from desktop_gui_agent.agent.model_client import ModelClient
-from desktop_gui_agent.config import AGENT_MAX_STEPS, AGENT_MAX_CONSECUTIVE_ERRORS, AGENT_STEP_DELAY
+from desktop_gui_agent.config import (
+    AGENT_MAX_STEPS, AGENT_MAX_CONSECUTIVE_ERRORS, AGENT_STEP_DELAY,
+    VERIFY_CORRECT_ENABLED, VERIFY_CORRECT_MAX_NO_CHANGE, VERIFY_CORRECT_WAIT,
+    PERF_TIMING_ENABLED,
+)
 from desktop_gui_agent.control.keyboard_controller import KeyboardController
 from desktop_gui_agent.control.mouse_controller import MouseController
 from desktop_gui_agent.perception.ocr_recognizer import recognize
@@ -176,6 +180,113 @@ class TaskManager:
                     time.sleep(0.5)
         raise last_error  # type: ignore[misc]
 
+    @staticmethod
+    def _capture_state() -> dict:
+        """捕获当前 UI 状态快照，用于动作前后对比。
+
+        收集前台窗口标题和 UIA 控件树特征，不依赖截图
+        （UIA 比像素对比更快、更语义化）。
+
+        Returns:
+            状态特征字典，包含 window/uia_count/uia_types/uia_names。
+            非 Windows 或获取失败时返回空特征。
+        """
+        state = {
+            "fg_window_title": "",
+            "uia_count": 0,
+            "uia_type_counts": {},
+            "uia_names": (),
+        }
+
+        # 前台窗口标题
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            buf = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+            state["fg_window_title"] = buf.value
+        except Exception:
+            pass
+
+        # UIA 控件特征
+        try:
+            from desktop_gui_agent.perception.uia_parser import UiaParser
+            controls = UiaParser.get_foreground_controls()
+        except Exception:
+            controls = []
+
+        if controls:
+            state["uia_count"] = len(controls)
+            # 各类型数量
+            type_counts = {}
+            for c in controls:
+                ct = c.get("control_type", "?")
+                type_counts[ct] = type_counts.get(ct, 0) + 1
+            state["uia_type_counts"] = type_counts
+            # 前 15 个控件名称（排序后的元组，可哈希）
+            names = tuple(
+                sorted(c.get("name", "") for c in controls)[:15]
+            )
+            state["uia_names"] = names
+
+        return state
+
+    @staticmethod
+    def _has_state_changed(before: dict, after: dict) -> bool:
+        """对比前后状态快照，判断是否有实质性变化。
+
+        判断标准（满足任一即认为已变化）：
+        1. 前台窗口标题不同
+        2. UIA 控件总数变化 > 20%
+        3. 控件类型种类发生变化
+        4. 控件名称集合变化 > 30%
+
+        Args:
+            before: 动作前的状态快照。
+            after: 动作后的状态快照。
+
+        Returns:
+            True 表示检测到变化（动作生效），False 表示无变化（动作无效）。
+        """
+        # 1. 前台窗口变了（最直观的信号）
+        if before["fg_window_title"] != after["fg_window_title"]:
+            return True
+
+        b_count = before.get("uia_count", 0)
+        a_count = after.get("uia_count", 0)
+
+        # 如果都没有 UIA 数据，无法判断，保守认为有变化（避免误报）
+        if b_count == 0 and a_count == 0:
+            return True
+
+        # 2. 控件总数变化 > 20%
+        if b_count > 0:
+            change_ratio = abs(a_count - b_count) / b_count
+            if change_ratio > 0.2:
+                return True
+        elif a_count > 0:
+            # 从无到有（或反之）——明显变化
+            return True
+
+        # 3. 控件类型种类变化
+        b_types = set(before.get("uia_type_counts", {}).keys())
+        a_types = set(after.get("uia_type_counts", {}).keys())
+        if b_types != a_types:
+            return True
+
+        # 4. 控件名称集合变化 > 30%
+        b_names = set(before.get("uia_names", ()))
+        a_names = set(after.get("uia_names", ()))
+        if b_names or a_names:
+            all_names = b_names | a_names
+            if all_names:
+                common = b_names & a_names
+                similarity = len(common) / len(all_names) if all_names else 1.0
+                if similarity < 0.7:  # 变化 > 30%
+                    return True
+
+        return False
+
     def run(self, task: str, cancel_event: Optional[threading.Event] = None) -> dict:
         """执行 Agent 主循环。
 
@@ -199,6 +310,7 @@ class TaskManager:
 
         step = 0
         consecutive_errors = 0
+        consecutive_no_change = 0  # 验证-纠正：连续无状态变化步数
         history = []
         result_text = ""
 
@@ -304,14 +416,27 @@ class TaskManager:
                 except Exception:
                     pass
 
+                # 验证-纠正：连续无变化时，在下一次模型查询前注入恢复提示
+                recovery_hint = ""
+                if VERIFY_CORRECT_ENABLED and consecutive_no_change >= VERIFY_CORRECT_MAX_NO_CHANGE:
+                    recovery_hint = (
+                        "【!!! 纠正提示 — 上一步无效 !!!】\n"
+                        "前面步骤没有让屏幕发生任何变化，上一次操作没有生效。\n"
+                        "请换一种方法达成目标，严格禁止重复刚才做过的操作！\n\n"
+                    )
+                    logger.warning(
+                        f"[Verify] 注入恢复提示（连续{consecutive_no_change}次无变化）"
+                    )
+
                 marker_extra = (
+                    recovery_hint +
                     f"【当前前台窗口】{fg_window_title}\n"
                     "【屏幕标注说明】\n"
                     "  绿色矩形框 = Windows 应用按钮/控件（来自 UIA）\n"
                     "  橙色圆点 = 非标准 UI 文字（来自 OCR）\n"
                     "  请观察标注在图中的实际位置，用编号指定目标：\n"
                     + "\n".join(marker_text_lines)
-                ) if marker_text_lines else ""
+                ) if marker_text_lines else recovery_hint if recovery_hint else ""
 
                 model_start = time.time()
                 history_actions = [h["action_raw"] for h in history if "action_raw" in h]
@@ -372,12 +497,44 @@ class TaskManager:
                         consecutive_errors += 1
                         continue
 
-                # 6. 执行动作
+                # 6. 执行动作（含验证-纠正循环）
+                # 动作前：捕获 UI 状态快照
+                pre_state = self._capture_state() if VERIFY_CORRECT_ENABLED else None
+
                 exec_start = time.time()
                 success = self._dispatch(action)
                 timings["execution"] = time.time() - exec_start
 
-                # 7. 记录本步历史
+                # 动作后：等待 UI 稳定，捕获新状态并对比
+                if pre_state is not None:
+                    time.sleep(VERIFY_CORRECT_WAIT)
+                    post_state = self._capture_state()
+                    changed = self._has_state_changed(pre_state, post_state)
+                    if not changed:
+                        consecutive_no_change += 1
+                        logger.warning(
+                            f"[Verify] 步骤{step} 无状态变化 "
+                            f"(连续{consecutive_no_change}次)"
+                        )
+                    else:
+                        if consecutive_no_change > 0:
+                            logger.info(
+                                f"[Verify] 步骤{step} 状态已恢复变化"
+                            )
+                        consecutive_no_change = 0
+
+                # 7. 性能计时日志（在记录历史之前，确保 finish 步骤也输出）
+                if PERF_TIMING_ENABLED:
+                    step_total = time.time() - step_start
+                    logger.info(
+                        f"[Perf] 步骤{step} 总耗时{step_total:.2f}s | "
+                        f"截图={timings.get('screenshot',0):.3f}s "
+                        f"OCR={timings.get('ocr',0):.3f}s "
+                        f"模型={timings.get('model',0):.3f}s "
+                        f"执行={timings.get('execution',0):.3f}s"
+                    )
+
+                # 8. 记录本步历史
                 history.append({
                     "step": step,
                     "screenshot": screenshot_path,
@@ -396,7 +553,7 @@ class TaskManager:
                 else:
                     consecutive_errors = 0  # 成功后重置连续错误计数
 
-                # 8. 判断终止条件
+                # 9. 判断终止条件
                 if action["action_type"] == "finish":
                     result_text = action["params"].get("result", "任务完成")
                     logger.info(f"任务完成: {result_text}")
@@ -407,7 +564,7 @@ class TaskManager:
                         "error": None,
                     }
 
-                # 9. 步骤间延迟
+                # 10. 步骤间延迟
                 min_delay, max_delay = AGENT_STEP_DELAY
                 time.sleep(random.uniform(min_delay, max_delay))
 

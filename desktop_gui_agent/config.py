@@ -124,6 +124,14 @@ AGENT_MAX_STEPS = 20  # 默认最大步数上限
 AGENT_MAX_CONSECUTIVE_ERRORS = 3  # 连续错误次数阈值，超限则终止
 AGENT_STEP_DELAY = (0.5, 2.0)  # 步骤间随机延迟范围 (min, max)，单位秒
 
+# ===== 验证-纠正循环配置 =====
+VERIFY_CORRECT_ENABLED = True       # 是否启用验证-纠正循环：每步执行后检测状态变化
+VERIFY_CORRECT_MAX_NO_CHANGE = 2    # 连续无变化步数阈值，超限后注入恢复提示
+VERIFY_CORRECT_WAIT = 0.3           # 动作执行后等待UI稳定的时间（秒）
+
+# ===== 性能计时配置 =====
+PERF_TIMING_ENABLED = True          # 是否在每步日志中输出各环节耗时
+
 # ===== Prompt 模板配置 =====
 PROMPT_SYSTEM = """你是桌面GUI智能体。接收屏幕截图（带标注）和用户任务，输出下一步动作。
 

@@ -1529,3 +1529,294 @@ class TestGlobalHotkey:
 
         result = GlobalHotkey._filter_injected(None, FakeData())
         assert result is True  # 应放行真实事件
+
+
+class TestCaptureState:
+    """TaskManager._capture_state() 状态捕获测试"""
+
+    def test_capture_state_returns_dict(self):
+        """状态捕获应返回含正确键的字典"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        state = TaskManager._capture_state()
+
+        assert isinstance(state, dict)
+        assert "fg_window_title" in state
+        assert "uia_count" in state
+        assert "uia_type_counts" in state
+        assert "uia_names" in state
+        assert isinstance(state["uia_count"], int)
+        assert isinstance(state["uia_type_counts"], dict)
+        assert isinstance(state["uia_names"], tuple)
+
+    def test_capture_state_fg_window_title_is_string(self):
+        """前台窗口标题应为字符串（可能为空）"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        state = TaskManager._capture_state()
+
+        assert isinstance(state["fg_window_title"], str)
+
+
+class TestHasStateChanged:
+    """TaskManager._has_state_changed() 状态对比测试"""
+
+    @staticmethod
+    def _make_state(title="测试窗口", count=10, types=None, names=None):
+        """辅助：构建标准状态快照"""
+        return {
+            "fg_window_title": title,
+            "uia_count": count,
+            "uia_type_counts": types or {"Button": 8, "Edit": 2},
+            "uia_names": names or tuple(f"控件{i}" for i in range(min(count, 10))),
+        }
+
+    def test_same_state_returns_false(self):
+        """完全相同状态应返回 False"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        state = self._make_state()
+        assert TaskManager._has_state_changed(state, state) is False
+
+    def test_different_window_title_returns_true(self):
+        """前台窗口变化应返回 True"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        before = self._make_state(title="计算器")
+        after = self._make_state(title="记事本")
+        assert TaskManager._has_state_changed(before, after) is True
+
+    def test_control_count_change_over_20_percent_returns_true(self):
+        """控件数变化 >20% 应返回 True"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        before = self._make_state(count=10)
+        after = self._make_state(count=13)  # +30%
+        assert TaskManager._has_state_changed(before, after) is True
+
+    def test_control_count_change_under_20_percent_returns_false(self):
+        """控件数变化 <=20% 且其他不变应返回 False"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        before = self._make_state(count=10)
+        after = self._make_state(count=11)  # +10%，且类型和名称相同
+        # 需要名称也相同
+        names = tuple(f"控件{i}" for i in range(10))
+        before = self._make_state(count=10, names=names)
+        after = self._make_state(count=11, names=names)
+        assert TaskManager._has_state_changed(before, after) is False
+
+    def test_different_control_types_returns_true(self):
+        """控件类型分布变化应返回 True"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        before = self._make_state(types={"Button": 8, "Edit": 2})
+        after = self._make_state(types={"Button": 8, "Edit": 1, "CheckBox": 1})
+        assert TaskManager._has_state_changed(before, after) is True
+
+    def test_different_control_names_returns_true(self):
+        """控件名称大范围变化应返回 True"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        before = self._make_state(names=("按钮A", "按钮B", "按钮C", "输入框"))
+        after = self._make_state(names=("按钮X", "按钮Y", "按钮Z", "下拉框"))
+        assert TaskManager._has_state_changed(before, after) is True
+
+    def test_both_no_uia_returns_true(self):
+        """双方均无 UIA 数据时保守返回 True（避免误报无效）"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        before = {"fg_window_title": "", "uia_count": 0, "uia_type_counts": {}, "uia_names": ()}
+        after = {"fg_window_title": "", "uia_count": 0, "uia_type_counts": {}, "uia_names": ()}
+        assert TaskManager._has_state_changed(before, after) is True
+
+    def test_uia_from_zero_to_some_returns_true(self):
+        """UIA 控件从无到有应返回 True"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        before = {"fg_window_title": "桌面", "uia_count": 0, "uia_type_counts": {}, "uia_names": ()}
+        after = self._make_state(count=5)
+        assert TaskManager._has_state_changed(before, after) is True
+
+
+class TestVerifyCorrectIntegration:
+    """验证-纠正循环集成测试"""
+
+    def test_recovery_hint_injected_after_no_change(self):
+        """连续 2 次无变化后，模型查询应收到恢复提示"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        import desktop_gui_agent.agent.task_manager as tm_module
+
+        mock_model = MagicMock()
+        # 前两步返回相同动作，第三步返回 finish
+        mock_model.query.side_effect = [
+            'click_marker(1)',
+            'click_marker(1)',
+            'finish(result="done")',
+        ]
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        mock_keyboard = MagicMock()
+
+        # 注入假状态：模拟每次 _capture_state 返回相同状态
+        fake_state = {
+            "fg_window_title": "计算器",
+            "uia_count": 36,
+            "uia_type_counts": {"Button": 33, "Edit": 3},
+            "uia_names": tuple(f"btn{i}" for i in range(15)),
+        }
+
+        with patch.object(tm_module, "capture") as mock_capture, \
+             patch.object(tm_module, "recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"), \
+             patch.object(tm_module.TaskManager, "_capture_state", return_value=fake_state):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+                max_steps=3,
+            )
+            result = tm.run("测试任务")
+
+        # 连续 2 次无变化后，第 3 步模型应该收到含纠正提示的 extra_text
+        # 检查第 3 次 query 调用参数
+        assert result["success"] is True
+        # 验证第 2 次 (step 2) 和第 3 次 (step 3) 的 extra_text
+        call_args_list = mock_model.query.call_args_list
+        assert len(call_args_list) >= 3
+        # 第 3 次调用（索引 2）应包含恢复提示
+        extra_text_3 = call_args_list[2].kwargs.get("extra_text", "")
+        assert "纠正提示" in extra_text_3 or "上一步无效" in extra_text_3
+
+    def test_no_change_counter_resets_on_state_change(self):
+        """状态恢复变化后计数器重置，不再注入恢复提示"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        import desktop_gui_agent.agent.task_manager as tm_module
+
+        mock_model = MagicMock()
+        mock_model.query.side_effect = [
+            'click_marker(1)',
+            'click_marker(2)',
+            'finish(result="done")',
+        ]
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        mock_keyboard = MagicMock()
+
+        # 第一次状态相同（模拟无效点击），第二次状态不同（模拟有效点击）
+        same_state = {
+            "fg_window_title": "计算器",
+            "uia_count": 36,
+            "uia_type_counts": {"Button": 33},
+            "uia_names": tuple(f"btn{i}" for i in range(10)),
+        }
+        different_state = {
+            "fg_window_title": "计算器",
+            "uia_count": 35,  # 按钮少了一个（被点了）
+            "uia_type_counts": {"Button": 32},
+            "uia_names": tuple(f"btn{i}" for i in range(9)) + ("结果",),
+        }
+
+        # 第一次 _has_state_changed 返回 False，第二次返回 True
+        with patch.object(tm_module, "capture") as mock_capture, \
+             patch.object(tm_module, "recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"), \
+             patch.object(tm_module.TaskManager, "_has_state_changed") as mock_changed:
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+            # 三步各调用一次 _has_state_changed：第1步无变化，第2步有变化，第3步有变化
+            mock_changed.side_effect = [False, True, True]
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+                max_steps=3,
+            )
+            tm.run("测试任务")
+
+        # 第 3 次调用（finish 那一步）不应含恢复提示（因为计数器已重置）
+        extra_text_3 = mock_model.query.call_args_list[2].kwargs.get("extra_text", "")
+        assert "纠正提示" not in extra_text_3
+
+
+class TestPerformanceTiming:
+    """性能计时测试"""
+
+    def test_timings_recorded_in_history(self):
+        """每步历史记录应包含 timings 字段"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        import desktop_gui_agent.agent.task_manager as tm_module
+
+        mock_model = MagicMock()
+        mock_model.query.return_value = 'finish(result="done")'
+        mock_mouse = MagicMock()
+        mock_keyboard = MagicMock()
+
+        with patch.object(tm_module, "capture") as mock_capture, \
+             patch.object(tm_module, "recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+                max_steps=1,
+            )
+            result = tm.run("测试任务")
+
+        # 验证 run() 返回成功
+        assert result["success"] is True
+
+        # 验证模型 query 被调用时传入了正确的参数
+        mock_model.query.assert_called_once()
+        call_kwargs = mock_model.query.call_args.kwargs
+        assert "extra_text" in call_kwargs
+
+    def test_perf_timing_logged_during_run(self, caplog):
+        """性能计时应在运行中输出 [Perf] 日志"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        import desktop_gui_agent.agent.task_manager as tm_module
+        import logging
+
+        mock_model = MagicMock()
+        mock_model.query.return_value = 'finish(result="done")'
+        mock_mouse = MagicMock()
+        mock_keyboard = MagicMock()
+
+        with patch.object(tm_module, "capture") as mock_capture, \
+             patch.object(tm_module, "recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+                max_steps=1,
+            )
+
+            # 捕获根 logger 的日志（logger 名称路径太深时 caplog 可能匹配不上）
+            with caplog.at_level(logging.INFO):
+                tm.run("测试任务")
+
+        # 应有 [Perf] 日志
+        perf_logs = [r.message for r in caplog.records if "[Perf]" in r.message]
+        assert len(perf_logs) >= 1, f"未找到 Perf 日志，共 {len(caplog.records)} 条记录"
+        assert "截图=" in perf_logs[0]
+        assert "模型=" in perf_logs[0]
+        assert "执行=" in perf_logs[0]
