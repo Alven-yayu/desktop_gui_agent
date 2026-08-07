@@ -195,3 +195,31 @@ class TestKeyboardControllerContextManager:
                 pass
             # 即使抛了异常，_release_all 也应被调用
             # （由 mock 验证，不会真的操作键盘）
+
+
+# ===== MouseController.get_position 测试 =====
+
+class TestMouseGetPosition:
+    """MouseController.get_position() 测试"""
+
+    def test_get_position_returns_tuple(self):
+        """真实控制器应返回 (x, y) 元组"""
+        from desktop_gui_agent.control.mouse_controller import MouseController
+        mc = MouseController()
+        pos = mc.get_position()
+        assert isinstance(pos, tuple)
+        assert len(pos) == 2
+        # 屏幕坐标应为非负整数
+        assert all(isinstance(v, int) and v >= 0 for v in pos)
+
+    def test_get_position_tolerates_failure(self):
+        """底层 pynput 异常时返回 (0, 0)，不崩溃"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.control.mouse_controller import MouseController
+
+        mc = MouseController()
+        mock_mouse = MagicMock()
+        mock_mouse.position = 123  # 整数不可迭代，tuple() 会抛 TypeError
+        with patch.object(mc, "_mouse", mock_mouse):
+            result = mc.get_position()
+        assert result == (0, 0)

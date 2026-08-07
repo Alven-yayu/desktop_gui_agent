@@ -62,6 +62,21 @@ class MouseController:
             logger.error(f"鼠标移动失败 ({x}, {y}): {e}")
             return False
 
+    def get_position(self) -> tuple:
+        """获取当前鼠标屏幕坐标。
+
+        供任务循环注入到模型上下文：模型需要知道"鼠标现在在哪"
+        才能规划拖拽起点、判断是否需要移动。
+
+        Returns:
+            (x, y) 元组；获取失败返回 (0, 0)。
+        """
+        try:
+            return tuple(self._mouse.position)
+        except Exception as e:
+            logger.error(f"获取鼠标位置失败: {e}")
+            return (0, 0)
+
     def click(self, x: Optional[int] = None, y: Optional[int] = None) -> bool:
         """左键单击。
 

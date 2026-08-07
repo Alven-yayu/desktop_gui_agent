@@ -477,8 +477,21 @@ class TaskManager:
                         f"[Verify] 注入恢复提示（连续{consecutive_no_change}次无变化）"
                     )
 
+                # 当前鼠标位置：模型规划拖拽/右键时需要知道鼠标在哪。
+                # 防御性处理：mock 场景下 get_position 可能返回非元组。
+                cursor_line = ""
+                try:
+                    pos = self.mouse.get_position()
+                    if isinstance(pos, (tuple, list)) and len(pos) == 2:
+                        cursor_line = (
+                            f"【当前鼠标位置】({int(pos[0])}, {int(pos[1])})\n"
+                        )
+                except Exception:
+                    pass
+
                 marker_extra = (
                     recovery_hint +
+                    cursor_line +
                     f"【当前前台窗口】{fg_window_title}\n"
                     "【屏幕标注说明】\n"
                     "  绿色矩形框 = Windows 应用按钮/控件（来自 UIA）\n"

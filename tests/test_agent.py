@@ -773,6 +773,63 @@ class TestTaskManagerRun:
         assert result["steps"] == 1
         assert "任务完成" in result["result"]
 
+    def test_run_injects_cursor_position(self):
+        """每步应把当前鼠标位置注入到模型上下文的 extra_text"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        mock_model = MagicMock()
+        mock_model.query.return_value = 'finish(result="done")'
+        mock_mouse = MagicMock()
+        mock_mouse.get_position.return_value = (10, 20)
+        mock_keyboard = MagicMock()
+
+        with patch("desktop_gui_agent.agent.task_manager.capture") as mock_capture, \
+             patch("desktop_gui_agent.agent.task_manager.recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+            )
+            tm.run("测试任务")
+
+        assert mock_model.query.call_count == 1
+        extra = mock_model.query.call_args.kwargs.get("extra_text", "")
+        assert "【当前鼠标位置】(10, 20)" in extra
+
+    def test_run_cursor_position_tolerates_bad_mock(self):
+        """mouse.get_position 返回非元组时不应崩溃，也不注入"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        mock_model = MagicMock()
+        mock_model.query.return_value = 'finish(result="done")'
+        mock_mouse = MagicMock()  # get_position 返回 MagicMock（非元组）
+        mock_keyboard = MagicMock()
+
+        with patch("desktop_gui_agent.agent.task_manager.capture") as mock_capture, \
+             patch("desktop_gui_agent.agent.task_manager.recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+            )
+            result = tm.run("测试任务")
+
+        assert result["success"] is True
+        extra = mock_model.query.call_args.kwargs.get("extra_text", "")
+        assert "【当前鼠标位置】" not in extra
+
     def test_run_reaches_max_steps(self):
         """模型持续返回非 finish 动作，达到 max_steps 上限"""
         from unittest.mock import MagicMock, patch
