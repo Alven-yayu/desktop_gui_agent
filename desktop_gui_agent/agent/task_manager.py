@@ -19,7 +19,8 @@ from desktop_gui_agent.config import (
     AGENT_MAX_STEPS, AGENT_MAX_CONSECUTIVE_ERRORS, AGENT_STEP_DELAY,
     VERIFY_CORRECT_ENABLED, VERIFY_CORRECT_MAX_NO_CHANGE, VERIFY_CORRECT_WAIT,
     VERIFY_PIXEL_THRESHOLD,
-    PERF_TIMING_ENABLED, ANNOTATE_MAX_ITEMS, HISTORY_MAX_ITEMS,
+    PERF_TIMING_ENABLED, ANNOTATE_MAX_ITEMS, ANNOTATE_NO_CROP_KEYWORDS,
+    HISTORY_MAX_ITEMS,
 )
 from desktop_gui_agent.control.keyboard_controller import KeyboardController
 from desktop_gui_agent.control.mouse_controller import MouseController
@@ -625,8 +626,11 @@ class TaskManager:
                 # 完整桌面标注时，小窗口按钮的编号是稀疏大号（如28、29），
                 # 且可能超出 max_items 上限而没被标注。先裁剪窗口再标注，
                 # 按钮就能获得 1、2、3… 密集清晰编号，模型读得准。
+                # 但系统级任务（音量/回收站等）目标在任务栏/托盘，裁剪会裁掉，
+                # 此时跳过裁剪保留完整上下文。
+                no_crop = any(kw in task for kw in ANNOTATE_NO_CROP_KEYWORDS)
                 fg_rect = None
-                if not is_desktop:
+                if not is_desktop and not no_crop:
                     fg_rect = self._get_foreground_window_rect()
                     if fg_rect:
                         fg_rect = self._expand_rect(
