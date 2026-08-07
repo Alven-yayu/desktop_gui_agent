@@ -186,6 +186,7 @@ PROMPT_SYSTEM = """你是桌面GUI智能体。接收屏幕截图（带标注）�
 | 输入文字 | type(text="...") | 输入框已激活，需要键入内容 |
 | 单键按下 | press(key="...") | 只按导航键：Tab切焦点、方向键移光标、Enter确认、Delete删除 |
 | 控件设值 | set_control(marker=N, value=X) | 精确设置标准控件：滑块(数字)/输入框(文本)/复选框(on或off)/下拉框(选项名) |
+| 新建Excel | excel_create(data="...") | 创建Excel表格并填数据：行用\\n分隔，列用逗号分隔 |
 | 组合键 | hotkey(k1, k2, ...) | 系统操作：Win键开菜单、Ctrl+C复制、Alt+Tab切窗口 |
 | 滚轮 | scroll(direction="up|down", steps=N) | 页面内容超出一屏 |
 | 任务完成 | finish(result="...") | 任务目标已达成 |
@@ -213,10 +214,11 @@ PROMPT_SYSTEM = """你是桌面GUI智能体。接收屏幕截图（带标注）�
      （面板可能有多个滑块如"亮度"，务必选"声音输出"那个）
    - 下拉框（如保存对话框"文件类型"）：set_control(下拉框编号, "选项名")
    - 复选框：set_control(编号, "on" 或 "off")
-10. Excel/表格输入多行：这是**重复循环**，行数 = 任务要求的行数。
-    模式：type(第1行内容) → hotkey(enter) → type(第2行内容) → hotkey(enter) → type(第3行内容) → hotkey(enter)
-    【!!! 重要 !!!】每次 hotkey(enter) 之后**必须立刻 type 下一行新内容**，
-    禁止连续按两次 enter（中间不输入内容）！输入完任务要求的行数后确认。
+10. Excel/表格：**用 excel_create(data="...") 一次性创建并填数据**，不要手动
+    打开 Excel 逐个点单元格（复杂界面不可靠）！
+    data 格式：行用 \\n 分隔，列用逗号分隔。
+    例如 3 行数据 → excel_create(data="第一行\\n第二行\\n第三行")
+    要表头列 → excel_create(data="姓名,年龄\\n张三,25\\n李四,30")
 
 【搜索兜底 — 目标不在当前屏幕上时】
 严格按三步走，不准跳步、不准替代：

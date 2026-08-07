@@ -372,6 +372,21 @@ class TestActionParser:
         result = parse("set_control(marker=5, value=\"on\")")
         assert result["action_type"] == "set_control"
 
+    # ---- excel_create（Excel 专门自动化）----
+    def test_parse_excel_create(self):
+        """excel_create 解析，\\n 应转成真实换行"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('excel_create(data="第一行\\n第二行\\n第三行")')
+        assert result["action_type"] == "excel_create"
+        assert result["params"]["data"] == "第一行\n第二行\n第三行"
+
+    def test_parse_excel_create_with_columns(self):
+        """excel_create 带列数据"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('excel_create(data="姓名,年龄\\n张三,25")')
+        assert result["action_type"] == "excel_create"
+        assert result["params"]["data"] == "姓名,年龄\n张三,25"
+
 
 # ===== ModelClient 测试 =====
 from unittest.mock import patch, MagicMock
@@ -826,6 +841,19 @@ class TestTaskManagerDispatch:
         assert result is None
         assert "99" in tm._bad_marker_hint
         assert "打开应用" in tm._bad_marker_hint
+
+    def test_dispatch_excel_create_calls_helper(self):
+        """excel_create 应调用 excel_helper.create_with_data"""
+        from unittest.mock import patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        tm = TaskManager()
+        with patch("desktop_gui_agent.control.excel_helper.create_with_data") as mock_cwd:
+            mock_cwd.return_value = True
+            result = tm._dispatch(
+                {"action_type": "excel_create", "params": {"data": "A\nB\nC"}}
+            )
+            mock_cwd.assert_called_once_with("A\nB\nC")
+        assert result is True
 
 
 class TestBuildHistoryActions:

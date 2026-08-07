@@ -192,6 +192,11 @@ class TaskManager:
             )
         elif action_type == "press":
             return self.keyboard.press(params["key"])
+        elif action_type == "excel_create":
+            # Excel 专门自动化：COM 直接创建带数据的工作簿
+            from desktop_gui_agent.control.excel_helper import create_with_data
+            logger.info(f"[Excel] excel_create 数据: {params['data'][:80]}...")
+            return create_with_data(params["data"])
         elif action_type in ("set_slider", "set_control"):
             # 通过 UIA 直接设标准控件值（滑块/输入框/复选/下拉/单选），
             # 不依赖鼠标精确点击。set_slider 是 set_control 的兼容别名。
