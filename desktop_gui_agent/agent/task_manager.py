@@ -704,9 +704,18 @@ class TaskManager:
                     pass
 
                 # 基础上下文始终保留（即使 0 个标注，模型也需要知道光标/前台窗口）
+                # 本机路径：文件对话框保存/打开时需要真实路径（模型无法猜用户名）
+                try:
+                    desktop_p = os.path.expanduser("~/Desktop").replace("\\", "/")
+                    home_p = os.path.expanduser("~").replace("\\", "/")
+                    path_line = f"【本机路径】桌面: {desktop_p} | 用户目录: {home_p}\n"
+                except Exception:
+                    path_line = ""
+
                 marker_extra = (
                     recovery_hint +
                     cursor_line +
+                    path_line +
                     f"【当前前台窗口】{fg_window_title}\n"
                 )
                 # 标注说明仅在有标注时追加（含 0 个标注的空桌面）

@@ -983,6 +983,34 @@ class TestTaskManagerRun:
         extra = mock_model.query.call_args.kwargs.get("extra_text", "")
         assert "【当前鼠标位置】" not in extra
 
+    def test_run_injects_local_paths(self):
+        """每步应把本机桌面路径注入到模型上下文（文件对话框导航用）"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        mock_model = MagicMock()
+        mock_model.query.return_value = 'finish(result="done")'
+        mock_mouse = MagicMock()
+        mock_keyboard = MagicMock()
+
+        with patch("desktop_gui_agent.agent.task_manager.capture") as mock_capture, \
+             patch("desktop_gui_agent.agent.task_manager.recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+            )
+            tm.run("测试任务")
+
+        extra = mock_model.query.call_args.kwargs.get("extra_text", "")
+        assert "【本机路径】" in extra
+        assert "桌面:" in extra
+
     def test_run_reaches_max_steps(self):
         """模型持续返回非 finish 动作，达到 max_steps 上限"""
         from unittest.mock import MagicMock, patch
