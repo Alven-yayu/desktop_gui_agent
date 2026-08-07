@@ -95,6 +95,39 @@ class TaskManager:
             return False
         return True
 
+    def _resolve_marker(self, marker: int) -> Optional[tuple]:
+        """根据标注编号从 marker_map 解析屏幕坐标 (x, y)。
+
+        Args:
+            marker: 模型输出的标注编号。
+
+        Returns:
+            (x, y) 坐标元组；编号不存在时返回 None 并记录警告。
+        """
+        info = self._marker_map.get(marker, {})
+        # 优先 click_point（新格式），回退 icon（旧格式兼容）
+        x, y = info.get("click_point") or info.get("icon", (None, None))
+        if x is None:
+            keys = list(self._marker_map.keys())
+            logger.warning(f"标注 #{marker} 不存在，可用: {keys}")
+            return None
+        return int(x), int(y)
+
+    def _marker_log(self, action_name: str, marker: int, x: int, y: int) -> None:
+        """输出 marker 动作的定位日志，方便对照截图排查。
+
+        Args:
+            action_name: 动作名称（如 click_marker）。
+            marker: 标注编号。
+            x, y: 解析出的屏幕坐标。
+        """
+        info = self._marker_map.get(marker, {})
+        source = info.get("source", "?")
+        logger.info(
+            f"[UIA] {action_name}(#{marker}) → ({x}, {y}) "
+            f"\"{info.get('text', '')}\" ({source})"
+        )
+
     def _dispatch(self, action: dict) -> bool:
         """根据动作类型分发到对应的控制器方法。
 
@@ -108,34 +141,46 @@ class TaskManager:
         params = action.get("params", {})
 
         if action_type == "click_marker":
-            marker = params["marker"]
-            info = self._marker_map.get(marker, {})
-            # 优先 click_point（新格式），回退 icon（旧格式兼容）
-            x, y = info.get("click_point") or info.get("icon", (None, None))
-            if x is None:
-                keys = list(self._marker_map.keys())
-                logger.warning(f"标注 #{marker} 不存在，可用: {keys}")
+            pos = self._resolve_marker(params["marker"])
+            if pos is None:
                 return False
-            source = info.get("source", "?")
-            logger.info(
-                f"[UIA] click_marker(#{marker}) → ({x}, {y}) "
-                f"\"{info.get('text', '')}\" ({source})"
-            )
+            x, y = pos
+            self._marker_log("click_marker", params["marker"], x, y)
             return self.mouse.click(x, y)
         elif action_type == "double_click_marker":
-            marker = params["marker"]
-            info = self._marker_map.get(marker, {})
-            x, y = info.get("click_point") or info.get("icon", (None, None))
-            if x is None:
-                keys = list(self._marker_map.keys())
-                logger.warning(f"标注 #{marker} 不存在，可用: {keys}")
+            pos = self._resolve_marker(params["marker"])
+            if pos is None:
                 return False
-            source = info.get("source", "?")
-            logger.info(
-                f"[UIA] double_click_marker(#{marker}) → ({x}, {y}) "
-                f"\"{info.get('text', '')}\" ({source})"
-            )
+            x, y = pos
+            self._marker_log("double_click_marker", params["marker"], x, y)
             return self.mouse.double_click(x, y)
+        elif action_type == "right_click_marker":
+            pos = self._resolve_marker(params["marker"])
+            if pos is None:
+                return False
+            x, y = pos
+            self._marker_log("right_click_marker", params["marker"], x, y)
+            return self.mouse.right_click(x, y)
+        elif action_type == "right_click":
+            return self.mouse.right_click(params["x"], params["y"])
+        elif action_type == "drag_marker":
+            p1 = self._resolve_marker(params["from"])
+            p2 = self._resolve_marker(params["to"])
+            if p1 is None or p2 is None:
+                return False
+            x1, y1 = p1
+            x2, y2 = p2
+            logger.info(
+                f"[UIA] drag_marker(#{params['from']}→#{params['to']}) "
+                f"({x1},{y1})→({x2},{y2})"
+            )
+            return self.mouse.drag_from_to(x1, y1, x2, y2)
+        elif action_type == "drag":
+            return self.mouse.drag_from_to(
+                params["x1"], params["y1"], params["x2"], params["y2"]
+            )
+        elif action_type == "press":
+            return self.keyboard.press(params["key"])
         elif action_type == "click":
             return self.mouse.click(params["x"], params["y"])
         elif action_type == "double_click":
@@ -488,14 +533,28 @@ class TaskManager:
                             "error": "模型陷入死循环（连续3次相同动作）",
                         }
 
-                # 5. 坐标校验（仅 click 动作）
-                if action["action_type"] == "click":
+                # 5. 坐标校验（click / right_click / drag 坐标形式）
+                # 越界坐标会导致鼠标点到屏幕外，视为一次错误
+                screen_w, screen_h = image.size
+                invalid = False
+                if action["action_type"] in ("click", "right_click"):
                     x, y = action["params"]["x"], action["params"]["y"]
-                    screen_w, screen_h = image.size
                     if not self._validate_coordinates(x, y, screen_w, screen_h):
                         logger.warning(f"坐标越界: ({x}, {y})，屏幕={screen_w}x{screen_h}")
-                        consecutive_errors += 1
-                        continue
+                        invalid = True
+                elif action["action_type"] == "drag":
+                    p = action["params"]
+                    pts = [(p["x1"], p["y1"]), (p["x2"], p["y2"])]
+                    for px, py in pts:
+                        if not self._validate_coordinates(px, py, screen_w, screen_h):
+                            logger.warning(
+                                f"drag 坐标越界: ({px}, {py})，屏幕={screen_w}x{screen_h}"
+                            )
+                            invalid = True
+                            break
+                if invalid:
+                    consecutive_errors += 1
+                    continue
 
                 # 6. 执行动作（含验证-纠正循环）
                 # 动作前：捕获 UI 状态快照

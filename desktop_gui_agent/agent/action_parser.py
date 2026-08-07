@@ -15,12 +15,40 @@ logger = get_logger(__name__)
 # ===== 各动作的正则表达式 =====
 
 # marker 动作（推荐！模型只需指定编号，代码翻译为坐标）
+# 注意：(?<!_) 负向断言防止 right_click_marker / drag_marker 的子串
+# "click_marker(" 被本正则误命中（如 right_click_marker(3) 内含 click_marker(3)）。
 _PATTERN_CLICK_MARKER = re.compile(
-    r'click_marker\s*\(\s*(\d+)\s*\)',
+    r'(?<!_)click_marker\s*\(\s*(\d+)\s*\)',
     re.IGNORECASE,
 )
 _PATTERN_DOUBLE_CLICK_MARKER = re.compile(
-    r'double_click_marker\s*\(\s*(\d+)\s*\)',
+    r'(?<!_)double_click_marker\s*\(\s*(\d+)\s*\)',
+    re.IGNORECASE,
+)
+
+# 右键（marker + 坐标）
+_PATTERN_RIGHT_CLICK_MARKER = re.compile(
+    r'(?<!_)right_click_marker\s*\(\s*(\d+)\s*\)',
+    re.IGNORECASE,
+)
+_PATTERN_RIGHT_CLICK = re.compile(
+    r'(?<!_)right_click\s*\(\s*x\s*=\s*(-?\d+)\s*,\s*y\s*=\s*(-?\d+)\s*\)',
+    re.IGNORECASE,
+)
+
+# 拖拽（marker→marker + 坐标）
+_PATTERN_DRAG_MARKER = re.compile(
+    r'(?<!_)drag_marker\s*\(\s*from\s*=\s*(\d+)\s*,\s*to\s*=\s*(\d+)\s*\)',
+    re.IGNORECASE,
+)
+_PATTERN_DRAG = re.compile(
+    r'(?<!_)drag\s*\(\s*x1\s*=\s*(-?\d+)\s*,\s*y1\s*=\s*(-?\d+)\s*,\s*x2\s*=\s*(-?\d+)\s*,\s*y2\s*=\s*(-?\d+)\s*\)',
+    re.IGNORECASE,
+)
+
+# 单键按下（支持 press(key="tab") 与 press(key=tab)）
+_PATTERN_PRESS = re.compile(
+    r'(?<!_)press\s*\(\s*key\s*=\s*"?([a-zA-Z0-9_]+)"?\s*\)',
     re.IGNORECASE,
 )
 
@@ -110,6 +138,36 @@ def _build_double_click_marker_params(match: re.Match) -> Dict[str, int]:
     return {"marker": int(match.group(1))}
 
 
+def _build_right_click_marker_params(match: re.Match) -> Dict[str, int]:
+    """从正则匹配结果构建 right_click_marker 参数字典。"""
+    return {"marker": int(match.group(1))}
+
+
+def _build_right_click_params(match: re.Match) -> Dict[str, int]:
+    """从正则匹配结果构建 right_click 参数字典。"""
+    return {"x": int(match.group(1)), "y": int(match.group(2))}
+
+
+def _build_drag_marker_params(match: re.Match) -> Dict[str, int]:
+    """从正则匹配结果构建 drag_marker 参数字典。"""
+    return {"from": int(match.group(1)), "to": int(match.group(2))}
+
+
+def _build_drag_params(match: re.Match) -> Dict[str, int]:
+    """从正则匹配结果构建 drag 参数字典。"""
+    return {
+        "x1": int(match.group(1)),
+        "y1": int(match.group(2)),
+        "x2": int(match.group(3)),
+        "y2": int(match.group(4)),
+    }
+
+
+def _build_press_params(match: re.Match) -> Dict[str, str]:
+    """从正则匹配结果构建 press 参数字典。"""
+    return {"key": match.group(1)}
+
+
 def _build_double_click_params(match: re.Match) -> Dict[str, int]:
     """从正则匹配结果构建 double_click 参数字典。"""
     return {"x": int(match.group(1)), "y": int(match.group(2))}
@@ -155,11 +213,17 @@ def _build_finish_params(match: re.Match) -> Dict[str, str]:
     return {"result": match.group(1)}
 
 
-# 解析器列表，按优先级排序：click > type > scroll > hotkey > finish
+# 解析器列表，按优先级排序：marker 动作优先 > 右键/拖拽/单键 > 传统坐标 > 其余
+# 注意：right_click_marker 必须排在 click_marker 之前（虽然已有负向断言兜底，
+# 排前面更保险），drag_marker 也要在 click/double_click 之前，防止被吞。
 _PARSERS = [
-    # marker 动作优先——模型只需给编号，代码翻译坐标
+    (_PATTERN_RIGHT_CLICK_MARKER, "right_click_marker", _build_right_click_marker_params),
+    (_PATTERN_RIGHT_CLICK, "right_click", _build_right_click_params),
     (_PATTERN_CLICK_MARKER, "click_marker", _build_click_marker_params),
     (_PATTERN_DOUBLE_CLICK_MARKER, "double_click_marker", _build_double_click_marker_params),
+    (_PATTERN_DRAG_MARKER, "drag_marker", _build_drag_marker_params),
+    (_PATTERN_DRAG, "drag", _build_drag_params),
+    (_PATTERN_PRESS, "press", _build_press_params),
     # 传统坐标动作（兼容）
     (_PATTERN_DOUBLE_CLICK, "double_click", _build_double_click_params),
     (_PATTERN_CLICK, "click", _build_click_params),

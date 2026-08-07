@@ -261,6 +261,82 @@ class TestActionParser:
         assert result["action_type"] == "scroll"
         assert result["params"]["steps"] == 1
 
+    # ---- right_click（右键）----
+    def test_parse_right_click_marker(self):
+        """解析 right_click_marker(3)"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("right_click_marker(3)")
+        assert result["action_type"] == "right_click_marker"
+        assert result["params"] == {"marker": 3}
+
+    def test_parse_right_click_coords(self):
+        """解析 right_click(x=100, y=200)"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("right_click(x=100, y=200)")
+        assert result["action_type"] == "right_click"
+        assert result["params"] == {"x": 100, "y": 200}
+
+    def test_parse_right_click_marker_not_click_marker(self):
+        """回归：right_click_marker 不能被 click_marker 正则误吞"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("right_click_marker(3)")
+        assert result["action_type"] == "right_click_marker"
+
+    def test_parse_right_click_not_click(self):
+        """回归：right_click(x=1,y=2) 不能被 click 正则误吞"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("right_click(x=1, y=2)")
+        assert result["action_type"] == "right_click"
+
+    # ---- drag（拖拽）----
+    def test_parse_drag_marker(self):
+        """解析 drag_marker(from=1, to=5)"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("drag_marker(from=1, to=5)")
+        assert result["action_type"] == "drag_marker"
+        assert result["params"] == {"from": 1, "to": 5}
+
+    def test_parse_drag_coords(self):
+        """解析 drag(x1=100,y1=200,x2=300,y2=400)"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("drag(x1=100,y1=200,x2=300,y2=400)")
+        assert result["action_type"] == "drag"
+        assert result["params"] == {"x1": 100, "y1": 200, "x2": 300, "y2": 400}
+
+    def test_parse_drag_negative_coords(self):
+        """drag 坐标支持负数（不会因负号匹配失败）"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("drag(x1=-5,y1=10,x2=-20,y2=30)")
+        assert result["action_type"] == "drag"
+        assert result["params"] == {"x1": -5, "y1": 10, "x2": -20, "y2": 30}
+
+    def test_parse_drag_marker_missing_to(self):
+        """drag_marker 缺 to 参数返回 unknown"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("drag_marker(from=1)")
+        assert result["action_type"] == "unknown"
+
+    # ---- press（单键）----
+    def test_parse_press_quoted(self):
+        """解析 press(key="tab")（带引号）"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('press(key="tab")')
+        assert result["action_type"] == "press"
+        assert result["params"] == {"key": "tab"}
+
+    def test_parse_press_unquoted(self):
+        """解析 press(key=enter)（不带引号）"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("press(key=enter)")
+        assert result["action_type"] == "press"
+        assert result["params"] == {"key": "enter"}
+
+    def test_parse_press_missing_key(self):
+        """press() 缺 key 参数返回 unknown"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("press()")
+        assert result["action_type"] == "unknown"
+
 
 # ===== ModelClient 测试 =====
 from unittest.mock import patch, MagicMock
@@ -580,6 +656,91 @@ class TestTaskManagerDispatch:
         result = tm._dispatch({"action_type": "click", "params": {"x": 100, "y": 200}})
         assert result is False
 
+    # ---- 新增动作：右键 / 拖拽 / 单键 ----
+    def test_dispatch_right_click_marker_calls_mouse(self):
+        """right_click_marker 应从 marker_map 解析坐标并调用 mouse.right_click"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.right_click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._marker_map = {3: {"click_point": (10, 20), "text": "回收站", "source": "uia"}}
+        result = tm._dispatch({"action_type": "right_click_marker", "params": {"marker": 3}})
+        mock_mouse.right_click.assert_called_once_with(10, 20)
+        assert result is True
+
+    def test_dispatch_right_click_calls_mouse(self):
+        """right_click 坐标形式应调用 mouse.right_click(x, y)"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.right_click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        result = tm._dispatch({"action_type": "right_click", "params": {"x": 100, "y": 200}})
+        mock_mouse.right_click.assert_called_once_with(100, 200)
+        assert result is True
+
+    def test_dispatch_drag_marker_calls_mouse(self):
+        """drag_marker 应解析两个 marker 坐标并调用 mouse.drag_from_to"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.drag_from_to.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._marker_map = {
+            1: {"click_point": (100, 200)},
+            5: {"click_point": (300, 400)},
+        }
+        result = tm._dispatch({"action_type": "drag_marker", "params": {"from": 1, "to": 5}})
+        mock_mouse.drag_from_to.assert_called_once_with(100, 200, 300, 400)
+        assert result is True
+
+    def test_dispatch_drag_calls_mouse(self):
+        """drag 坐标形式应调用 mouse.drag_from_to(x1,y1,x2,y2)"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.drag_from_to.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        result = tm._dispatch({
+            "action_type": "drag",
+            "params": {"x1": 100, "y1": 200, "x2": 300, "y2": 400},
+        })
+        mock_mouse.drag_from_to.assert_called_once_with(100, 200, 300, 400)
+        assert result is True
+
+    def test_dispatch_press_calls_keyboard(self):
+        """press 动作应调用 keyboard.press(key)"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_keyboard = MagicMock()
+        mock_keyboard.press.return_value = True
+        tm = TaskManager(keyboard=mock_keyboard)
+        result = tm._dispatch({"action_type": "press", "params": {"key": "tab"}})
+        mock_keyboard.press.assert_called_once_with("tab")
+        assert result is True
+
+    def test_dispatch_right_click_marker_missing_returns_false(self):
+        """right_click_marker 指向不存在的编号应返回 False"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        tm = TaskManager(mouse=mock_mouse)
+        result = tm._dispatch({"action_type": "right_click_marker", "params": {"marker": 99}})
+        assert result is False
+        mock_mouse.right_click.assert_not_called()
+
+    def test_dispatch_drag_marker_missing_returns_false(self):
+        """drag_marker 任一点不存在应返回 False"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        tm = TaskManager(mouse=mock_mouse)
+        tm._marker_map = {1: {"click_point": (100, 200)}}
+        result = tm._dispatch({"action_type": "drag_marker", "params": {"from": 1, "to": 99}})
+        assert result is False
+        mock_mouse.drag_from_to.assert_not_called()
+
 
 class TestTaskManagerRun:
     """TaskManager.run() 主循环测试"""
@@ -674,6 +835,73 @@ class TestTaskManagerRun:
 
         assert result["success"] is False
         assert "连续错误次数超限" in result["error"]
+
+    def test_run_drag_out_of_bounds_increments_errors(self):
+        """drag 坐标越界应计入连续错误，最终终止，且不调用 drag_from_to"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        mock_model = MagicMock()
+        # 每次越界坐标不同，避免死循环检测，从而触发连续错误终止
+        mock_model.query.side_effect = [
+            'drag(x1=-5,y1=0,x2=10,y2=10)',
+            'drag(x1=-6,y1=0,x2=10,y2=10)',
+            'drag(x1=-7,y1=0,x2=10,y2=10)',
+        ]
+        mock_mouse = MagicMock()
+        mock_keyboard = MagicMock()
+
+        with patch("desktop_gui_agent.agent.task_manager.capture") as mock_capture, \
+             patch("desktop_gui_agent.agent.task_manager.recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+                max_steps=5,
+                max_consecutive_errors=3,
+            )
+            result = tm.run("测试任务")
+
+        assert result["success"] is False
+        assert "连续错误次数超限" in result["error"]
+        mock_mouse.drag_from_to.assert_not_called()
+
+    def test_run_right_click_valid_coords_executes(self):
+        """right_click 坐标在校验范围内应正常执行"""
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+        from desktop_gui_agent.agent.task_manager import TaskManager
+
+        mock_model = MagicMock()
+        mock_model.query.side_effect = [
+            'right_click(x=10, y=10)',
+            'finish(result="done")',
+        ]
+        mock_mouse = MagicMock()
+        mock_mouse.right_click.return_value = True
+        mock_keyboard = MagicMock()
+
+        with patch("desktop_gui_agent.agent.task_manager.capture") as mock_capture, \
+             patch("desktop_gui_agent.agent.task_manager.recognize") as mock_ocr, \
+             patch("desktop_gui_agent.agent.task_manager.time.sleep"):
+            mock_capture.return_value = Image.new("RGB", (100, 100))
+            mock_ocr.return_value = []
+
+            tm = TaskManager(
+                model_client=mock_model,
+                mouse=mock_mouse,
+                keyboard=mock_keyboard,
+                max_steps=5,
+            )
+            result = tm.run("测试任务")
+
+        assert result["success"] is True
+        mock_mouse.right_click.assert_called_once_with(10, 10)
 
     def test_run_error_counter_resets_after_success(self):
         """连续错误计数应在成功后重置"""
