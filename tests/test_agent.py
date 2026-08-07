@@ -1525,6 +1525,20 @@ class TestPromptBuilding:
         assert "hotkey(alt, f4)" in config.PROMPT_SYSTEM  # 关闭窗口
         assert "click_marker" in config.PROMPT_SYSTEM     # 鼠标用于大按钮
 
+    def test_prompt_has_file_dialog_hard_rules(self):
+        """PROMPT 应包含文件对话框硬规则（Ctrl+S → Ctrl+L → 路径）"""
+        import desktop_gui_agent.config as config
+        assert "文件对话框硬规则" in config.PROMPT_SYSTEM
+        assert "hotkey(ctrl, s)" in config.PROMPT_SYSTEM  # 打开保存框
+        assert "hotkey(ctrl, l)" in config.PROMPT_SYSTEM  # 地址栏
+
+    def test_prompt_has_shortcut_hard_rules(self):
+        """PROMPT 应包含快捷键硬规则（任务里的快捷键转 hotkey）"""
+        import desktop_gui_agent.config as config
+        assert "快捷键硬规则" in config.PROMPT_SYSTEM
+        assert "hotkey(alt, f4)" in config.PROMPT_SYSTEM
+        assert "hotkey(ctrl, v)" in config.PROMPT_SYSTEM  # 粘贴
+
     @patch('desktop_gui_agent.agent.model_client.process_vision_info')
     @patch('desktop_gui_agent.agent.model_client._load_local_model')
     def test_cot_guidance_in_user_prompt(self, mock_load, mock_pvi):
