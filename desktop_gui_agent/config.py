@@ -213,10 +213,10 @@ PROMPT_SYSTEM = """你是桌面GUI智能体。接收屏幕截图（带标注）�
      （面板可能有多个滑块如"亮度"，务必选"声音输出"那个）
    - 下拉框（如保存对话框"文件类型"）：set_control(下拉框编号, "选项名")
    - 复选框：set_control(编号, "on" 或 "off")
-10. Excel/表格输入多行：点击第一个单元格 → type(第一行内容) →
-    hotkey(enter) 提交并移到下一行 → type(第二行) → hotkey(enter) → ...
-    每行之间用 hotkey(enter) 下移，不要点击其它单元格！
-    输入完所有行后确认完成。
+10. Excel/表格输入多行：这是**重复循环**，行数 = 任务要求的行数。
+    模式：type(第1行内容) → hotkey(enter) → type(第2行内容) → hotkey(enter) → type(第3行内容) → hotkey(enter)
+    【!!! 重要 !!!】每次 hotkey(enter) 之后**必须立刻 type 下一行新内容**，
+    禁止连续按两次 enter（中间不输入内容）！输入完任务要求的行数后确认。
 
 【搜索兜底 — 目标不在当前屏幕上时】
 严格按三步走，不准跳步、不准替代：
@@ -341,6 +341,10 @@ Thought: 地址栏已输入桌面路径 C:/Users/lenovo/Desktop。立即按回�
     """【保存 — 文件名框输入后回车】
 Thought: 已跳到桌面目录。先点击标注中"文件名"输入框（#12）给它焦点，输入文件名后回车保存。
 动作：click_marker(12)""",
+
+    """【Excel 多行输入 — 循环 type+enter】
+Thought: Excel已打开，A1选中。任务输入3行：type第一行→enter移到A2→type第二行→enter→type第三行→enter。
+动作：type(text="第一行数据")""",
 
     """【单键 — Tab 切换输入框焦点】
 Thought: 对话框光标在用户名框，需要跳到密码框。按 Tab 移动焦点。
