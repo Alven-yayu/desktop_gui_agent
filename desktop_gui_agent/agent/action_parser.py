@@ -17,18 +17,20 @@ logger = get_logger(__name__)
 # marker 动作（推荐！模型只需指定编号，代码翻译为坐标）
 # 注意：(?<!_) 负向断言防止 right_click_marker / drag_marker 的子串
 # "click_marker(" 被本正则误命中（如 right_click_marker(3) 内含 click_marker(3)）。
+# 可选 text="..." 参数：模型声明它认为该标注的文字，执行层据此核对，
+# 防止模型凭想象/幻觉点错标注（点击目标核对守卫）。
 _PATTERN_CLICK_MARKER = re.compile(
-    r'(?<!_)click_marker\s*\(\s*(\d+)\s*\)',
+    r'(?<!_)click_marker\s*\(\s*(\d+)\s*(?:,\s*text\s*=\s*"([^"]*)"\s*)?\)',
     re.IGNORECASE,
 )
 _PATTERN_DOUBLE_CLICK_MARKER = re.compile(
-    r'(?<!_)double_click_marker\s*\(\s*(\d+)\s*\)',
+    r'(?<!_)double_click_marker\s*\(\s*(\d+)\s*(?:,\s*text\s*=\s*"([^"]*)"\s*)?\)',
     re.IGNORECASE,
 )
 
 # 右键（marker + 坐标）
 _PATTERN_RIGHT_CLICK_MARKER = re.compile(
-    r'(?<!_)right_click_marker\s*\(\s*(\d+)\s*\)',
+    r'(?<!_)right_click_marker\s*\(\s*(\d+)\s*(?:,\s*text\s*=\s*"([^"]*)"\s*)?\)',
     re.IGNORECASE,
 )
 _PATTERN_RIGHT_CLICK = re.compile(
@@ -82,8 +84,10 @@ _PATTERN_CLICK = re.compile(
     re.IGNORECASE,
 )
 
+# type 支持可选 enter=True：输入后立即回车（搜索/地址栏/算式等需要确认的场景）。
+# 一次动作完成"输入+确认"，避免模型在两步之间做多余的中间判断（如计算器反复补数字）。
 _PATTERN_TYPE = re.compile(
-    r'type\s*\(\s*text\s*=\s*"(.*?)"\s*\)',
+    r'type\s*\(\s*text\s*=\s*"(.*?)"\s*(?:,\s*enter\s*=\s*(True|False))?\s*\)',
     re.IGNORECASE,
 )
 
@@ -147,19 +151,32 @@ def parse(model_output: Optional[str]) -> Dict[str, Any]:
     return {"action_type": "unknown", "raw": text}
 
 
-def _build_click_marker_params(match: re.Match) -> Dict[str, int]:
-    """从正则匹配结果构建 click_marker 参数字典。"""
-    return {"marker": int(match.group(1))}
+def _build_click_marker_params(match: re.Match) -> Dict[str, Any]:
+    """从正则匹配结果构建 click_marker 参数字典。
+
+    支持可选 text 参数：模型声明它认为该标注的文字，
+    供执行层核对真实标注内容（防幻觉误点）。
+    """
+    params: Dict[str, Any] = {"marker": int(match.group(1))}
+    if match.group(2) is not None and match.group(2).strip():
+        params["text"] = match.group(2).strip()
+    return params
 
 
-def _build_double_click_marker_params(match: re.Match) -> Dict[str, int]:
+def _build_double_click_marker_params(match: re.Match) -> Dict[str, Any]:
     """从正则匹配结果构建 double_click_marker 参数字典。"""
-    return {"marker": int(match.group(1))}
+    params: Dict[str, Any] = {"marker": int(match.group(1))}
+    if match.group(2) is not None and match.group(2).strip():
+        params["text"] = match.group(2).strip()
+    return params
 
 
-def _build_right_click_marker_params(match: re.Match) -> Dict[str, int]:
+def _build_right_click_marker_params(match: re.Match) -> Dict[str, Any]:
     """从正则匹配结果构建 right_click_marker 参数字典。"""
-    return {"marker": int(match.group(1))}
+    params: Dict[str, Any] = {"marker": int(match.group(1))}
+    if match.group(2) is not None and match.group(2).strip():
+        params["text"] = match.group(2).strip()
+    return params
 
 
 def _build_right_click_params(match: re.Match) -> Dict[str, int]:
@@ -226,9 +243,15 @@ def _build_click_params(match: re.Match) -> Dict[str, int]:
     return {"x": int(match.group(1)), "y": int(match.group(2))}
 
 
-def _build_type_params(match: re.Match) -> Dict[str, str]:
-    """从正则匹配结果构建 type 参数字典。"""
-    return {"text": match.group(1)}
+def _build_type_params(match: re.Match) -> Dict[str, Any]:
+    """从正则匹配结果构建 type 参数字典。
+
+    enter=True 表示输入后立即回车（由执行层完成，避免模型两步间多判断）。
+    """
+    params: Dict[str, Any] = {"text": match.group(1)}
+    if match.group(2) == "True":
+        params["enter"] = True
+    return params
 
 
 def _build_scroll_params(match: re.Match) -> Dict[str, Any]:

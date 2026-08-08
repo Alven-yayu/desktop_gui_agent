@@ -6,6 +6,7 @@
 import json
 import os
 import random
+import re
 import threading
 import time
 from datetime import datetime
@@ -82,6 +83,8 @@ class TaskManager:
         self.model_client = model_client
         self._marker_map: dict = {}  # 标注编号 → 坐标映射
         self._bad_marker_hint = ""  # 上一步模型输出无效标注编号时的纠正提示
+        self._last_type_text: str = ""  # 上一步 type 的文本（防重复输入守卫）
+        self._last_type_enter: bool = False  # 上一步 type 是否带 enter
         self._initial_window: dict = {}  # 任务开始时的前台窗口锚点（关闭窗口守卫用）
         logger.info(
             f"TaskManager 初始化，max_steps={max_steps}，"
@@ -147,6 +150,262 @@ class TaskManager:
             f"\"{info.get('text', '')}\" ({source})"
         )
 
+    # ===== 点击目标核对守卫 =====
+    # 背景：模型会在屏幕上"看到"不存在的目标（幻觉），或把标注编号看错位，
+    # 然后自信地输出 click_marker(N)。若执行层直接翻译编号点击，就会静默点错
+    # （如任务要"打开计算器"，模型却点了 #8=哔哩哔哩）。此守卫在点击前用
+    # 标注的真实文字做硬校验，把"模型说什么就点什么"变成"与事实不符就拦截"。
+
+    # 泛称应用类别 → 真实应用名（小写子串匹配）。
+    # 任务说"打开浏览器"时，桌面上的 Chrome/Edge 图标、前台 Edge 窗口都应视为
+    # "浏览器已打开"，否则守卫会误判目标一直未打开而过度拦截。
+    _GENERIC_CATEGORY_APPS: dict = {
+        "浏览器": ["chrome", "edge", "firefox", "iexplore", "浏览器", "microsoft edge"],
+        "资源管理器": ["explorer", "文件资源管理器", "此电脑"],
+        "文件管理器": ["explorer", "文件资源管理器"],
+    }
+
+    @staticmethod
+    def _relates_to_open_target(text: str, target: str) -> bool:
+        """判断一段文字（窗口标题/标注文字）是否与"打开目标"相关。
+
+        精确包含或共享子串（_texts_relate）之外，还处理泛称类别：
+        target="浏览器" 时，文字含 "Chrome"/"Edge"/"浏览器" 都算相关，
+        从而允许对真实浏览器图标/窗口的点击。
+
+        Args:
+            text: 要判断的文字（窗口标题或标注文字）。
+            target: 打开目标应用名（_extract_open_target 的返回值）。
+
+        Returns:
+            True 表示文字与目标相关。
+        """
+        if not text or not target:
+            return False
+        if TaskManager._texts_relate(text, target):
+            return True
+        low = text.lower()
+        for cat, members in TaskManager._GENERIC_CATEGORY_APPS.items():
+            if target == cat:
+                for m in members:
+                    if m in low:
+                        return True
+        return False
+
+    @staticmethod
+    def _texts_relate(a: str, b: str) -> bool:
+        """判断两段文字是否相关：子串包含，或共享任意 2 字子串。
+
+        用于中英文混合场景：精确相等、包含（"计算器"⊂"计算器应用"）、
+        以及共享二字词（"音量"与"音量控制"）都算相关。
+
+        Args:
+            a: 第一段文字。
+            b: 第二段文字。
+
+        Returns:
+            True 表示两段文字相关。
+        """
+        a = (a or "").strip().lower()
+        b = (b or "").strip().lower()
+        if not a or not b:
+            return False
+        if a in b or b in a:
+            return True
+        # 中文词通常是 2 字起，共享任意 2 字子串视为同一主题
+        for i in range(len(a) - 1):
+            if a[i:i + 2] in b:
+                return True
+        for i in range(len(b) - 1):
+            if b[i:i + 2] in a:
+                return True
+        return False
+
+    @staticmethod
+    def _is_name_like(text: str) -> bool:
+        """判断标注文字是否为"名称型"（需要做任务关键词核对）。
+
+        数字/单字符/纯符号按钮（计算器"1""7""C"、滚动箭头"+"）不是目标名称，
+        跳过校验，避免误伤正常的数值/按钮点击。
+
+        Args:
+            text: 标注文字。
+
+        Returns:
+            True 表示是名称型文字，False 表示跳过关键词校验。
+        """
+        t = (text or "").strip()
+        if len(t) < 2:
+            return False
+        # 纯数字/符号（按钮值）：如 "1"、"7"、"C"、"+"、"OK"
+        if re.fullmatch(r"[\d\s+\-*/%.=()\[\]{}<>]+", t):
+            return False
+        # 含至少 2 个中文字符 → 应用名/按钮名（如"哔哩哔哩"、"保存"）
+        if len(re.findall(r"[一-鿿]", t)) >= 2:
+            return True
+        # 英文单词（≥3 字母）→ 按钮名（如 "Save"、"Cancel"）
+        if re.fullmatch(r"[a-zA-Z\s]{3,}", t):
+            return True
+        return False
+
+    # ===== 打开应用 → 点击放行策略（防点击落点不可靠）=====
+    # 用户策略（2026-08-08 实测反馈修正）：
+    # - 桌面上的应用图标可以点击——只要编号对应的文字是对的（由 _marker_click_guard 核对）。
+    # - 桌面上没有想打开的应用时，不乱点，用搜索打开。
+    # - 搜索界面里的结果条目点选不可靠（会打开错应用），禁止点，改在已打开的搜索框直接输入。
+    # - 目标应用已在前台，或在浏览器/应用内操作时，不拦。
+    # 因此只在"前台是搜索界面"或"前台是无关应用窗口"时拦截；桌面和已打开的应用窗口放行。
+
+    @staticmethod
+    def _foreground_title() -> str:
+        """获取当前前台窗口标题（仅 Windows；失败返回空串）。"""
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                return ""
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+            return buf.value
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _extract_open_target(task: str) -> str:
+        """从"打开X"类任务中提取目标应用名；非此类任务或目标模糊时返回空串。
+
+        规则：
+        - 匹配"打开/启动/开启/运行"后紧跟的名称（到标点/空格为止）。
+        - 名称过长（>8 字）、过短（<2 字）、或含功能词（的/里/文件/文档等，
+          如"打开桌面上的测试文档"）视为模糊目标，不返回（不触发守卫）。
+
+        Args:
+            task: 用户任务文本。
+
+        Returns:
+            目标应用名，无法判定时返回空串。
+        """
+        if not task:
+            return ""
+        m = re.search(r"(?:打开|启动|开启|运行)\s*([^\s，。,!?！？]+)", task)
+        if not m:
+            return ""
+        target = m.group(1)
+        # 剥离动作词后缀：复合任务"打开浏览器搜索X"→"浏览器"、"打开记事本输入Y"→"记事本"、
+        # "打开计算器计算Z"→"计算器"。用 $ 锚定只剥结尾的动作词，避免拆开应用名本身
+        # （如"计算器"含"计算"，但"计算器"是应用名，不能拆成""+"器"）。
+        target = re.sub(
+            r"(?:搜索|输入|查找|点击|选择|打开|设置|查看|计算|运行|启动|进入|新建|双击)$",
+            "",
+            target,
+        ).strip()
+        if len(target) > 8 or len(target) < 2:
+            return ""
+        if any(w in target for w in ("的", "里", "中", "内", "文件", "文档", "目录")):
+            return ""
+        return target
+
+    def _open_task_search_guard(self) -> bool:
+        """"打开X"任务：只在"搜索界面点选"和"无关应用窗口"两种场景拦截点击。
+
+        返回 True 表示放行点击；False 表示已拦截（注入纠正提示）。
+
+        场景判定：
+        - 目标应用已在前台（含泛称匹配，如"浏览器"↔Edge/Chrome）→ 放行。
+        - 前台是搜索界面 → 拦截，改为在已打开的搜索框直接输入应用名。
+        - 前台是桌面 → 放行（桌面应用图标可以点，正确性由 _marker_click_guard 核对）。
+        - 前台是其他无关应用窗口 → 拦截，用搜索打开。
+        - 系统级任务（音量/亮度/回收站等）目标不是应用窗口，一律放行。
+        """
+        task = str(getattr(self, "_current_task", "") or "")
+        target = self._extract_open_target(task)
+        if not target:
+            return True  # 非"打开X"任务
+        # 系统级任务：音量/回收站等目标不是应用窗口，不强制搜索
+        if any(k in task for k in (
+            "音量", "亮度", "回收站", "任务栏", "系统托盘", "快速设置", "通知"
+        )):
+            return True
+        title = (self._foreground_title() or "").strip()
+        if self._relates_to_open_target(title, target):
+            return True  # 目标应用已在前台（含泛称匹配），点击放行
+        if "搜索" in title or title in ("开始", "Start"):
+            # 搜索界面：点选结果不可靠 → 拦截，改在已打开的搜索框直接输入应用名。
+            # 不再建议按 win（搜索已打开，再按会空转）。
+            self._bad_marker_hint = (
+                f"【!!! 纠正 — 搜索框已打开，直接输入应用名 !!!】\n"
+                f"当前是搜索界面，点选搜索结果不可靠。搜索框已聚焦，请直接 "
+                f"type(\"{target}\") 并回车打开，不要再按 win。\n\n"
+            )
+            logger.warning(
+                f"[OpenGuard] 拦截搜索界面点击，改为直接输入 {target}（前台={title!r}）"
+            )
+            return False
+        if title in ("Program Manager", "桌面"):
+            # 桌面：应用图标可以点，是否正确由 _marker_click_guard 核对
+            return True
+        # 其他无关应用窗口 → 拦截，用搜索打开
+        self._bad_marker_hint = (
+            f"【!!! 纠正 — 当前窗口不是目标应用，用搜索打开 !!!】\n"
+            f"任务要打开“{target}”，但当前前台窗口是“{title}”，不是目标应用。\n"
+            f"请用搜索：hotkey(win) → type(\"{target}\") → hotkey(enter)。\n\n"
+        )
+        logger.warning(
+            f"[OpenGuard] 拦截无关窗口点击，改用搜索打开 {target}（前台={title!r}）"
+        )
+        return False
+
+    def _marker_click_guard(self, marker: int, claimed_text: str = "") -> tuple:
+        """点击前核对标注真实文字，防止模型点错目标。
+
+        双重校验：
+        - Tier 1（自证）：模型在动作里带了 text=...，则必须与标注真实文字相关，
+          否则说明模型根本没看标注/在看幻影目标，拒绝。
+        - Tier 2（任务关键词兜底）：模型没带 text 时，若任务有明确目标关键词、
+          且标注是名称型文字且与任务无关，则拒绝，并要求模型明确确认或重看截图。
+
+        Args:
+            marker: 模型要点击的标注编号。
+            claimed_text: 模型声称该标注是什么（可选，来自 click_marker(N, text=...)）。
+
+        Returns:
+            (ok, feedback)：ok=False 表示应拦截（feedback 为注入下一步的纠正提示）；
+            ok=True 表示放行。
+        """
+        info = self._marker_map.get(marker, {})
+        actual = str(info.get("text", "") or "").strip()
+        task = str(getattr(self, "_current_task", "") or "")
+
+        if claimed_text:
+            claimed = claimed_text.strip()
+            if actual and not self._texts_relate(claimed, actual):
+                return False, (
+                    f"【!!! 纠正 — 点击目标与标注不符 !!!】\n"
+                    f"你声称标注 #{marker} 是“{claimed}”，但它的真实文字是“{actual}”。\n"
+                    f"不要凭想象点标注。请重新看截图，用正确编号点击。\n\n"
+                )
+        elif actual and task and self._is_name_like(actual):
+            # 与"打开目标"（含泛称类别，如"浏览器"↔Chrome/Edge）或任务关键词
+            # 任一相关即放行；都无关才拒绝。
+            target = self._extract_open_target(task)
+            related = (
+                self._relates_to_open_target(actual, target) if target else False
+            )
+            if not related:
+                keywords = ModelClient._extract_keywords(task)
+                related = any(
+                    self._texts_relate(actual, kw) for kw in keywords
+                )
+            if not related:
+                return False, (
+                    f"【!!! 纠正 — 点击目标与任务无关 !!!】\n"
+                    f"标注 #{marker} 的文字是“{actual}”，与任务“{task}”无关。\n"
+                    f"请重新观察截图找正确目标；若确认要点击它，请输出 "
+                    f"click_marker({marker}, text=\"{actual}\") 明确确认。\n\n"
+                )
+        return True, ""
+
     def _dispatch(self, action: dict) -> bool:
         """根据动作类型分发到对应的控制器方法。
 
@@ -159,27 +418,36 @@ class TaskManager:
         action_type = action.get("action_type", "unknown")
         params = action.get("params", {})
 
-        if action_type == "click_marker":
+        if action_type in ("click_marker", "double_click_marker", "right_click_marker"):
+            # 打开应用守卫：任务要"打开X"且目标未在前台 → 拦截点击，强制键盘搜索。
+            # 防"点计算器结果却打开Word"这类点击落点不可靠问题。
+            if not self._open_task_search_guard():
+                return False
+            # 点击内容守卫：核对标注真实文字与任务/模型声称是否相符，防幻觉误点。
+            # 拦截时不点击，把纠正提示注入下一步 prompt，让模型直面真实标注。
+            ok, feedback = self._marker_click_guard(
+                params["marker"], params.get("text", "")
+            )
+            if not ok:
+                self._bad_marker_hint = feedback
+                logger.warning(
+                    f"[Guard] 拦截点击 #{params['marker']}: "
+                    f"{feedback.splitlines()[1].strip()}"
+                )
+                return False
             pos = self._resolve_marker(params["marker"])
             if pos is None:
                 return False
             x, y = pos
-            self._marker_log("click_marker", params["marker"], x, y)
-            return self.mouse.click(x, y)
-        elif action_type == "double_click_marker":
-            pos = self._resolve_marker(params["marker"])
-            if pos is None:
-                return False
-            x, y = pos
-            self._marker_log("double_click_marker", params["marker"], x, y)
-            return self.mouse.double_click(x, y)
-        elif action_type == "right_click_marker":
-            pos = self._resolve_marker(params["marker"])
-            if pos is None:
-                return False
-            x, y = pos
-            self._marker_log("right_click_marker", params["marker"], x, y)
-            return self.mouse.right_click(x, y)
+            if action_type == "click_marker":
+                self._marker_log("click_marker", params["marker"], x, y)
+                return self.mouse.click(x, y)
+            elif action_type == "double_click_marker":
+                self._marker_log("double_click_marker", params["marker"], x, y)
+                return self.mouse.double_click(x, y)
+            else:
+                self._marker_log("right_click_marker", params["marker"], x, y)
+                return self.mouse.right_click(x, y)
         elif action_type == "right_click":
             return self.mouse.right_click(params["x"], params["y"])
         elif action_type == "drag_marker":
@@ -223,7 +491,26 @@ class TaskManager:
         elif action_type == "double_click":
             return self.mouse.double_click(params["x"], params["y"])
         elif action_type == "type":
-            return self.keyboard.type(params["text"])
+            text = params["text"]
+            enter = bool(params.get("enter"))
+            # 防重复输入守卫：连续两次 type 相同文本且 enter 设置相同 → 拦截。
+            # 治"模型在浏览器里把搜索词输了两遍"这类问题（第一遍其实已生效，
+            # 模型没看结果又补了一遍，导致输入重复/叠加）。
+            if self._last_type_text == text and self._last_type_enter == enter:
+                self._bad_marker_hint = (
+                    f"【!!! 纠正 — 你已经输入过“{text}”，不要重复输入 !!!】\n"
+                    f"上一步已输入“{text}”，请等待结果并观察屏幕变化，不要再输入同一内容。\n\n"
+                )
+                logger.warning(f"[RepeatGuard] 拦截重复输入: {text!r} enter={enter}")
+                return False
+            self._last_type_text = text
+            self._last_type_enter = enter
+            ok = self.keyboard.type(text)
+            # type(..., enter=True)：输入后立即回车确认（搜索/地址栏/算式等）。
+            # 一次动作完成，避免模型在两步之间做多余的中间判断。
+            if ok and enter:
+                self.keyboard.press("enter")
+            return ok
         elif action_type == "scroll":
             return self.keyboard.scroll(params["direction"], params["steps"])
         elif action_type == "hotkey":
@@ -751,6 +1038,12 @@ class TaskManager:
         consecutive_no_change = 0  # 验证-纠正：连续无状态变化步数
         history = []
         result_text = ""
+        # 当前任务文本：点击守卫核对标注与任务是否相关时使用。
+        # 测试直接调 _dispatch 时不设置此值（为空），守卫自动跳过关键词校验。
+        self._current_task = task
+        # 每次任务重置防重复输入守卫状态
+        self._last_type_text = ""
+        self._last_type_enter = False
 
         # 终端窗口避让：先尝试最小化，失败则自动裁剪
         # （每次 run() 调用时执行一次，防止 OCR 自干扰）

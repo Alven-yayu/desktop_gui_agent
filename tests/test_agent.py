@@ -167,6 +167,21 @@ class TestActionParser:
         assert result["action_type"] == "type"
         assert "He said" in result["params"]["text"]
 
+    def test_parse_type_with_enter_true(self):
+        """解析 type(text="1+1", enter=True) 应带出 enter=True"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('type(text="1+1", enter=True)')
+        assert result["action_type"] == "type"
+        assert result["params"] == {"text": "1+1", "enter": True}
+
+    def test_parse_type_without_enter(self):
+        """type 不带 enter 参数时 params 无 enter 键（向后兼容）"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('type(text="1+1")')
+        assert result["action_type"] == "type"
+        assert result["params"] == {"text": "1+1"}
+        assert "enter" not in result["params"]
+
     # ---- scroll ----
     def test_parse_scroll_up(self):
         """解析 scroll(direction="up", steps=3)"""
@@ -336,6 +351,36 @@ class TestActionParser:
         from desktop_gui_agent.agent.action_parser import parse
         result = parse("press()")
         assert result["action_type"] == "unknown"
+
+    # ---- click_marker 带 text（点击目标核对守卫）----
+    def test_parse_click_marker_with_text(self):
+        """解析 click_marker(3, text=\"保存\") 应带出 text 参数"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('click_marker(3, text="保存")')
+        assert result["action_type"] == "click_marker"
+        assert result["params"] == {"marker": 3, "text": "保存"}
+
+    def test_parse_click_marker_without_text(self):
+        """click_marker(3) 不带 text 时 params 无 text 键（向后兼容）"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse("click_marker(3)")
+        assert result["action_type"] == "click_marker"
+        assert result["params"] == {"marker": 3}
+        assert "text" not in result["params"]
+
+    def test_parse_double_click_marker_with_text(self):
+        """解析 double_click_marker(2, text=\"回收站\")"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('double_click_marker(2, text="回收站")')
+        assert result["action_type"] == "double_click_marker"
+        assert result["params"] == {"marker": 2, "text": "回收站"}
+
+    def test_parse_right_click_marker_with_text(self):
+        """解析 right_click_marker(2, text=\"回收站\")"""
+        from desktop_gui_agent.agent.action_parser import parse
+        result = parse('right_click_marker(2, text="回收站")')
+        assert result["action_type"] == "right_click_marker"
+        assert result["params"] == {"marker": 2, "text": "回收站"}
 
     # ---- set_slider（滑块设值）----
     def test_parse_set_slider(self):
@@ -655,6 +700,30 @@ class TestTaskManagerDispatch:
         mock_keyboard.type.assert_called_once_with("hello")
         assert result is True
 
+    def test_dispatch_type_with_enter_presses_enter(self):
+        """type(..., enter=True) 输入后应立即按 enter"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_keyboard = MagicMock()
+        mock_keyboard.type.return_value = True
+        tm = TaskManager(keyboard=mock_keyboard)
+        result = tm._dispatch({
+            "action_type": "type", "params": {"text": "1+1", "enter": True},
+        })
+        mock_keyboard.type.assert_called_once_with("1+1")
+        mock_keyboard.press.assert_called_once_with("enter")
+        assert result is True
+
+    def test_dispatch_type_without_enter_no_press(self):
+        """type 不带 enter 时不应按 enter"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_keyboard = MagicMock()
+        mock_keyboard.type.return_value = True
+        tm = TaskManager(keyboard=mock_keyboard)
+        tm._dispatch({"action_type": "type", "params": {"text": "hello"}})
+        mock_keyboard.press.assert_not_called()
+
     def test_dispatch_scroll_calls_keyboard(self):
         """scroll 动作应调用 keyboard.scroll(direction, steps)"""
         from unittest.mock import MagicMock
@@ -775,6 +844,296 @@ class TestTaskManagerDispatch:
         assert result is False
         mock_mouse.right_click.assert_not_called()
 
+    # ---- 点击目标核对守卫（防幻觉误点）----
+    def test_dispatch_guard_blocks_unrelated_marker(self):
+        """任务要"打开计算器"，点 #8（哔哩哔哩）应被拦截，不执行点击"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开计算器，输入 1+1 并回车得出结果"
+        tm._marker_map = {
+            8: {"click_point": (380, 276), "text": "哔哩哔哩", "source": "uia"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value="计算器"):
+            result = tm._dispatch(
+                {"action_type": "click_marker", "params": {"marker": 8}}
+            )
+        assert result is False
+        mock_mouse.click.assert_not_called()
+        assert "哔哩哔哩" in tm._bad_marker_hint
+
+    def test_dispatch_guard_rejects_wrong_claimed_text(self):
+        """模型声称 #8 是"计算器"但真实是"哔哩哔哩"→ Tier1 拒绝"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开计算器"
+        tm._marker_map = {
+            8: {"click_point": (380, 276), "text": "哔哩哔哩", "source": "uia"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value="计算器"):
+            result = tm._dispatch({
+                "action_type": "click_marker",
+                "params": {"marker": 8, "text": "计算器"},
+            })
+        assert result is False
+        mock_mouse.click.assert_not_called()
+
+    def test_dispatch_guard_passes_on_explicit_confirm(self):
+        """模型用 text 明确确认 #8 是"哔哩哔哩"→ 放行（多一轮确认不死锁）"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开计算器"
+        tm._marker_map = {
+            8: {"click_point": (380, 276), "text": "哔哩哔哩", "source": "uia"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value="计算器"):
+            result = tm._dispatch({
+                "action_type": "click_marker",
+                "params": {"marker": 8, "text": "哔哩哔哩"},
+            })
+        mock_mouse.click.assert_called_once_with(380, 276)
+        assert result is True
+
+    def test_dispatch_guard_skips_digit_buttons(self):
+        """数字/单字符按钮（计算器"1"）不做关键词校验，正常放行"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开计算器，输入 1+1 并回车得出结果"
+        tm._marker_map = {
+            29: {"click_point": (200, 300), "text": "1", "source": "uia"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value="计算器"):
+            result = tm._dispatch(
+                {"action_type": "click_marker", "params": {"marker": 29}}
+            )
+        mock_mouse.click.assert_called_once_with(200, 300)
+        assert result is True
+
+    def test_dispatch_guard_skips_empty_marker_text(self):
+        """标注无文字时不校验（图标按钮），放行"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开计算器"
+        tm._marker_map = {5: {"click_point": (10, 20)}}
+        with patch.object(TaskManager, "_foreground_title", return_value="计算器"):
+            result = tm._dispatch(
+                {"action_type": "click_marker", "params": {"marker": 5}}
+            )
+        mock_mouse.click.assert_called_once_with(10, 20)
+        assert result is True
+
+    def test_dispatch_guard_no_task_backward_compat(self):
+        """无 _current_task（旧测试/直接调 _dispatch）→ 守卫跳过，放行"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._marker_map = {1: {"click_point": (100, 200), "text": "回收站"}}
+        result = tm._dispatch({"action_type": "click_marker", "params": {"marker": 1}})
+        mock_mouse.click.assert_called_once_with(100, 200)
+        assert result is True
+
+    # ---- 打开应用 → 强制键盘搜索SOP（防点击落点不可靠）----
+    def test_open_search_guard_blocks_when_target_not_foreground(self):
+        """任务要"打开计算器"但前台是别的 → 拦截点击，强制键盘搜索"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开计算器，输入 1+1 并回车得出结果"
+        tm._marker_map = {
+            10: {"click_point": (848, 413), "text": "计算器", "source": "ocr"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value="Microsoft Word"):
+            result = tm._dispatch(
+                {"action_type": "click_marker", "params": {"marker": 10}}
+            )
+        assert result is False
+        mock_mouse.click.assert_not_called()
+        assert "搜索" in tm._bad_marker_hint
+        assert "计算器" in tm._bad_marker_hint
+
+    def test_open_search_guard_passes_when_target_foreground(self):
+        """目标已在前台（计算器已打开）→ 点击放行（如点数字按钮）"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开计算器，输入 1+1 并回车得出结果"
+        tm._marker_map = {
+            29: {"click_point": (200, 300), "text": "1", "source": "uia"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value="计算器"):
+            result = tm._dispatch(
+                {"action_type": "click_marker", "params": {"marker": 29}}
+            )
+        mock_mouse.click.assert_called_once_with(200, 300)
+        assert result is True
+
+    def test_open_search_guard_skips_system_tasks(self):
+        """系统级任务（音量）目标不是应用窗口 → 不强制搜索，放行"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开音量面板，把音量调整到 50%"
+        tm._marker_map = {3: {"click_point": (10, 20), "text": "音量"}}
+        with patch.object(TaskManager, "_foreground_title", return_value="快速设置"):
+            result = tm._dispatch(
+                {"action_type": "click_marker", "params": {"marker": 3}}
+            )
+        mock_mouse.click.assert_called_once_with(10, 20)
+        assert result is True
+
+    def test_open_search_guard_skips_non_open_task(self):
+        """非"打开X"任务（关闭当前窗口）→ 不拦截点击"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "关闭当前窗口"
+        tm._marker_map = {2: {"click_point": (50, 60), "text": "关闭"}}
+        result = tm._dispatch({"action_type": "click_marker", "params": {"marker": 2}})
+        mock_mouse.click.assert_called_once_with(50, 60)
+        assert result is True
+
+    def test_extract_open_target(self):
+        """从任务提取目标应用名；模糊/非打开任务返回空串"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        tm = TaskManager()
+        assert tm._extract_open_target("打开计算器，输入 1+1") == "计算器"
+        assert tm._extract_open_target("打开微信，发送消息") == "微信"
+        # 复合任务：剥离动作词后缀
+        assert tm._extract_open_target("打开浏览器搜索 Python") == "浏览器"
+        assert tm._extract_open_target("打开记事本输入 Hello World") == "记事本"
+        assert tm._extract_open_target("打开计算器计算 1+1") == "计算器"
+        assert tm._extract_open_target("用Win搜索打开Chrome浏览器") == ""
+        assert tm._extract_open_target("打开桌面上的测试文档.txt") == ""
+        assert tm._extract_open_target("关闭当前窗口") == ""
+        assert tm._extract_open_target("") == ""
+
+    def test_relates_to_open_target_generic_browser(self):
+        """目标"浏览器"→ Chrome/Edge/浏览器 都相关（泛称类别匹配）"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        assert TaskManager._relates_to_open_target("Google Chrome", "浏览器") is True
+        assert TaskManager._relates_to_open_target(
+            "新建标签页 - Microsoft Edge", "浏览器"
+        ) is True
+        assert TaskManager._relates_to_open_target("哔哩哔哩", "浏览器") is False
+        assert TaskManager._relates_to_open_target("计算器", "计算器") is True
+        assert TaskManager._relates_to_open_target("计算器", "") is False
+
+    def test_open_search_guard_allows_desktop_icon_click(self):
+        """桌面(Program Manager)图标可点：任务"打开浏览器"点"Google Chrome"应放行"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开浏览器搜索 Python"
+        tm._marker_map = {
+            24: {"click_point": (500, 600), "text": "Google Chrome", "source": "ocr"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value="Program Manager"):
+            result = tm._dispatch(
+                {"action_type": "click_marker",
+                 "params": {"marker": 24, "text": "Google Chrome"}}
+            )
+        mock_mouse.click.assert_called_once_with(500, 600)
+        assert result is True
+
+    def test_open_search_guard_allows_in_target_app(self):
+        """浏览器已在前台(Edge) → 应用内点击放行，不误拦"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开浏览器搜索 Python"
+        tm._marker_map = {
+            3: {"click_point": (800, 400), "text": "Python 搜索结果", "source": "ocr"}
+        }
+        with patch.object(TaskManager, "_foreground_title",
+                          return_value="Python - Microsoft Edge"):
+            result = tm._dispatch(
+                {"action_type": "click_marker",
+                 "params": {"marker": 3, "text": "Python 搜索结果"}}
+            )
+        mock_mouse.click.assert_called_once_with(800, 400)
+        assert result is True
+
+    def test_open_search_guard_blocks_search_interface(self):
+        """搜索界面点选结果不可靠 → 拦截，提示直接在搜索框输入应用名"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开计算器，计算 1+1"
+        tm._marker_map = {
+            11: {"click_point": (300, 400), "text": "计算器", "source": "ocr"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value="搜索"):
+            result = tm._dispatch(
+                {"action_type": "click_marker",
+                 "params": {"marker": 11, "text": "计算器"}}
+            )
+        assert result is False
+        mock_mouse.click.assert_not_called()
+        assert "type" in tm._bad_marker_hint
+        assert "不要再按 win" in tm._bad_marker_hint
+
+    # ---- 防重复输入守卫 ----
+    def test_dispatch_repeat_type_blocked(self):
+        """连续两次 type 相同文本+enter → 第二次拦截，不真正输入"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_keyboard = MagicMock()
+        mock_keyboard.type.return_value = True
+        tm = TaskManager(keyboard=mock_keyboard)
+        r1 = tm._dispatch(
+            {"action_type": "type", "params": {"text": "Python", "enter": True}}
+        )
+        assert r1 is True
+        mock_keyboard.type.assert_called_once_with("Python")
+        r2 = tm._dispatch(
+            {"action_type": "type", "params": {"text": "Python", "enter": True}}
+        )
+        assert r2 is False
+        assert mock_keyboard.type.call_count == 1  # 第二次未真正输入
+        assert "不要重复输入" in tm._bad_marker_hint
+
+    def test_dispatch_repeat_type_enter_change_allowed(self):
+        """先 type('记事本') 再 type('记事本', enter=True) → enter 不同，放行"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_keyboard = MagicMock()
+        mock_keyboard.type.return_value = True
+        tm = TaskManager(keyboard=mock_keyboard)
+        assert tm._dispatch(
+            {"action_type": "type", "params": {"text": "记事本"}}
+        ) is True
+        assert tm._dispatch(
+            {"action_type": "type", "params": {"text": "记事本", "enter": True}}
+        ) is True
+        assert mock_keyboard.type.call_count == 2
+
+    # ---- 防重复输入守卫（治 1+11）----
     def test_dispatch_drag_marker_missing_returns_false(self):
         """drag_marker 任一点不存在应返回 False"""
         from unittest.mock import MagicMock
