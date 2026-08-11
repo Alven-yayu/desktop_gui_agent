@@ -1118,8 +1118,9 @@ class TestTaskManagerDispatch:
         assert mock_keyboard.type.call_count == 1  # 第二次未真正输入
         assert "不要重复输入" in tm._bad_marker_hint
 
-    def test_dispatch_repeat_type_enter_change_allowed(self):
-        """先 type('记事本') 再 type('记事本', enter=True) → enter 不同，放行"""
+    def test_dispatch_repeat_type_enter_change_blocked(self):
+        """先 type('记事本') 再 type('记事本', enter=True) → enter 不同也拦截。
+        治"搜索框输入'记事本'→又补一遍变'记事本记事本'，回车打开错应用"这类叠加。"""
         from unittest.mock import MagicMock
         from desktop_gui_agent.agent.task_manager import TaskManager
         mock_keyboard = MagicMock()
@@ -1130,8 +1131,8 @@ class TestTaskManagerDispatch:
         ) is True
         assert tm._dispatch(
             {"action_type": "type", "params": {"text": "记事本", "enter": True}}
-        ) is True
-        assert mock_keyboard.type.call_count == 2
+        ) is False  # 文本相同 → 拦截，无论 enter 是否不同
+        assert mock_keyboard.type.call_count == 1
 
     # ---- 防重复输入守卫（治 1+11）----
     def test_dispatch_drag_marker_missing_returns_false(self):
@@ -2785,3 +2786,94 @@ class TestPerformanceTiming:
         assert "截图=" in perf_logs[0]
         assert "模型=" in perf_logs[0]
         assert "执行=" in perf_logs[0]
+
+
+class TestCalculatorDisplayHint:
+    """计算器显示区读取：注入模型真实算式状态，防误判重复输入"""
+
+    def test_extract_expr_and_result(self):
+        """同时有表达式和结果时，两者都注入"""
+        from unittest.mock import patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        fake_controls = [
+            {"name": "表达式为 1 + 1", "control_type": "Text", "bbox": (0, 0, 10, 10)},
+            {"name": "显示为 2", "control_type": "Text", "bbox": (0, 0, 10, 10)},
+        ]
+        with patch("desktop_gui_agent.perception.uia_parser.UiaParser.get_foreground_controls",
+                   return_value=fake_controls):
+            hint = TaskManager._calculator_display_hint()
+        assert "表达式为 1 + 1" in hint
+        assert "显示为 2" in hint
+
+    def test_extract_result_only(self):
+        """只有结果（空表达式）时，注入结果"""
+        from unittest.mock import patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        fake_controls = [
+            {"name": "显示为 0", "control_type": "Text", "bbox": (0, 0, 10, 10)},
+        ]
+        with patch("desktop_gui_agent.perception.uia_parser.UiaParser.get_foreground_controls",
+                   return_value=fake_controls):
+            hint = TaskManager._calculator_display_hint()
+        assert "显示为 0" in hint
+
+    def test_no_calculator_returns_empty(self):
+        """非计算器窗口返回空串（不注入噪音）"""
+        from unittest.mock import patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        fake_controls = [
+            {"name": "开始", "control_type": "Button", "bbox": (0, 0, 10, 10)},
+        ]
+        with patch("desktop_gui_agent.perception.uia_parser.UiaParser.get_foreground_controls",
+                   return_value=fake_controls):
+            hint = TaskManager._calculator_display_hint()
+        assert hint == ""
+
+
+class TestCalculatorClickGuard:
+    """计算器按键守卫：任务要计算时禁止逐个点按键，强制 type 一次性输入"""
+
+    def _make_tm(self, task, fg_title="计算器"):
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        tm = TaskManager(mouse=MagicMock(), keyboard=MagicMock())
+        tm._current_task = task
+        tm._marker_map = {1: {"source": "uia", "text": "加", "control_type": "Button",
+                              "bbox": (0, 0, 10, 10), "click_point": (5, 5)}}
+        with patch.object(TaskManager, "_foreground_title", return_value=fg_title):
+            return tm
+
+    def test_calc_task_calculator_button_blocked(self):
+        """计算任务+计算器前台+点加号 → 拦截"""
+        tm = self._make_tm("打开计算器并计算1+1")
+        with patch.object(tm, "_foreground_title", return_value="计算器"):
+            assert tm._calculator_click_guard(1) is False
+        assert "type" in tm._bad_marker_hint
+
+    def test_non_calc_task_allowed(self):
+        """非计算任务 → 放行"""
+        tm = self._make_tm("打开记事本输入Hello")
+        with patch.object(tm, "_foreground_title", return_value="记事本"):
+            assert tm._calculator_click_guard(1) is True
+
+    def test_calc_task_non_calculator_window_allowed(self):
+        """计算任务但前台非计算器 → 放行（可能是搜索界面）"""
+        tm = self._make_tm("打开计算器并计算1+1", fg_title="搜索")
+        with patch.object(tm, "_foreground_title", return_value="搜索"):
+            assert tm._calculator_click_guard(1) is True
+
+    def test_dispatch_calculator_click_blocked(self):
+        """完整 dispatch：计算任务点计算器加号 → 拦截且不执行点击"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse, keyboard=MagicMock())
+        tm._current_task = "打开计算器并计算1+1"
+        tm._marker_map = {1: {"source": "uia", "text": "加", "control_type": "Button",
+                              "bbox": (0, 0, 10, 10), "click_point": (5, 5)}}
+        with patch.object(tm, "_foreground_title", return_value="计算器"):
+            result = tm._dispatch({"action_type": "click_marker",
+                                   "params": {"marker": 1, "text": "加"}})
+        assert result is False
+        mock_mouse.click.assert_not_called()
