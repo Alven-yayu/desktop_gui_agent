@@ -124,10 +124,16 @@ class KeyboardController:
     # ===== 公共方法 =====
 
     def type(self, text: Optional[str]) -> bool:
-        """输入文本，逐字符打字。
+        """输入文本。
 
-        纯ASCII文本直接用 Controller.type() 模拟打字速度；
-        包含非ASCII字符（中文等）则通过剪贴板粘贴。
+        输入法问题背景：
+        - pynput 逐字符敲 ASCII 时，若系统输入法是中文模式，字母会被当拼音
+          实时组词（"hello"→"饿了咯"）。
+        - SendInput+KEYEVENTF_UNICODE 可绕过输入法，但实测在 Windows 11 新版
+          记事本等 WinUI 应用里不生效（字符被吞，状态栏仍 0 个字符）。
+        - 剪贴板粘贴(Ctrl+V)不经过输入法，Win32/WinUI 应用都支持，是唯一
+          同时解决"输入法组词"和"WinUI 兼容"的方案。
+        因此所有文本统一走剪贴板粘贴。
 
         Args:
             text: 要输入的文本，空字符串直接返回 True。
@@ -142,13 +148,10 @@ class KeyboardController:
             return True
 
         try:
-            if text.isascii():
-                # 纯 ASCII 用 pynput 直接键入：不丢字符，且不会因剪贴板
-                # 恢复时机问题在部分应用（如计算器）丢末尾字符。
-                self._type_ascii(text)
-            else:
-                # 含中文等非 ASCII → 剪贴板粘贴（pynput 无法逐字键入中文）
-                self._type_via_clipboard(text)
+            # 所有文本（中英文）统一走剪贴板粘贴：
+            # - 英文不会被中文输入法组词（剪贴板绕过输入法）
+            # - WinUI 应用（新版记事本/搜索框）能正确接收
+            self._type_via_clipboard(text)
             logger.debug(f"文本输入成功，长度={len(text)}")
             return True
         except Exception as e:
@@ -259,37 +262,16 @@ class KeyboardController:
 
     # ===== 内部方法 =====
 
-    # 需要 Shift 或 AltGr 的字符，pynput 逐字输入可能不准确，走剪贴板
-    _SPECIAL_CHARS = set("+*/-=()[]{}<>!@#$%^&|\\~`'\"")
-
-    @staticmethod
-    def _needs_clipboard(text: str) -> bool:
-        """判断文本是否需要走剪贴板粘贴（含特殊字符或中文）。"""
-        try:
-            text.encode("ascii")
-        except UnicodeEncodeError:
-            return True  # 非 ASCII → 剪贴板
-        return bool(set(text) & KeyboardController._SPECIAL_CHARS)
-
-    def _type_ascii(self, text: str) -> None:
-        """输入纯 ASCII 文本。
-
-        逐字符键入并加间隔：某些应用（如计算器）在处理运算符（+、-、*）后
-        需要时间切换状态，紧接的下一个字符会被吞掉。pynput 一次性 type(text)
-        过快会丢末尾字符，逐字符加间隔可避免。
-        """
-        for ch in text:
-            # pynput type() 自动处理 Shift/AltGr 修饰键（如 "+" 需 Shift+=）
-            self._keyboard.type(ch)
-            time.sleep(0.1)  # 每字符间隔，给应用处理时间
-
     def _type_via_clipboard(self, text: str) -> None:
-        """通过剪贴板粘贴输入中文文本。
+        """通过剪贴板粘贴输入文本（中英文通用）。
 
-        复制文本到剪贴板后执行 Ctrl+V 粘贴。
+        所有文本统一走剪贴板 Ctrl+V：
+        - 绕过输入法，英文不会被中文输入法组词（治"hello"→"饿了咯"）
+        - WinUI 应用（新版记事本/搜索框）能正确接收（SendInput 无效处有效）
+        粘贴后等待足够时间再恢复原始剪贴板，避免应用还没读完就恢复导致丢字符。
 
         Args:
-            text: 包含非ASCII字符的文本。
+            text: 要输入的文本。
         """
         import pyperclip
 
@@ -300,7 +282,8 @@ class KeyboardController:
             time.sleep(0.05)
             # 执行 Ctrl+V
             self.hotkey("ctrl", "v")
-            time.sleep(0.1)
+            # 等待应用完成读取再恢复剪贴板（0.3s），防丢末尾字符
+            time.sleep(0.3)
         finally:
             # 恢复原始剪贴板内容
             try:

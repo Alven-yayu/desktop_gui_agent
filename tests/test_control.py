@@ -27,14 +27,34 @@ class TestKeyboardType:
         assert result is True
 
     def test_type_chinese_text_uses_clipboard(self):
-        """中文文本应走剪贴板粘贴路径"""
+        """中文走剪贴板粘贴"""
         from desktop_gui_agent.control.keyboard_controller import KeyboardController
 
         kc = KeyboardController()
         with patch.object(kc, '_type_via_clipboard', return_value=True) as mock_cb:
             result = kc.type("你好世界")
             assert result is True
-            mock_cb.assert_called_once()
+            mock_cb.assert_called_once_with("你好世界")
+
+    def test_type_ascii_text_uses_clipboard(self):
+        """纯ASCII也走剪贴板：治中文输入法把英文当拼音组词，且 WinUI 应用能接收"""
+        from desktop_gui_agent.control.keyboard_controller import KeyboardController
+
+        kc = KeyboardController()
+        with patch.object(kc, '_type_via_clipboard', return_value=True) as mock_cb:
+            result = kc.type("Hello World")
+            assert result is True
+            mock_cb.assert_called_once_with("Hello World")
+
+    def test_type_mixed_text_uses_clipboard(self):
+        """混合中英文文本走剪贴板粘贴"""
+        from desktop_gui_agent.control.keyboard_controller import KeyboardController
+
+        kc = KeyboardController()
+        with patch.object(kc, '_type_via_clipboard', return_value=True) as mock_cb:
+            result = kc.type("Hello你好")
+            assert result is True
+            mock_cb.assert_called_once_with("Hello你好")
 
     def test_type_none_text_returns_false(self):
         """None输入应返回False"""
