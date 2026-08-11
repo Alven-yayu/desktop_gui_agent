@@ -239,20 +239,20 @@ class TestAnnotateOcrClickPoint:
         assert cp[1] < 65  # 文字中心 y=65，上偏后必须在其上方
 
     def test_max_items_defaults_from_config(self):
-        """默认最多标注 ANNOTATE_MAX_ITEMS 个元素（30）"""
+        """默认最多标注 ANNOTATE_MAX_ITEMS 个元素（40）"""
         from desktop_gui_agent.config import ANNOTATE_MAX_ITEMS
         from desktop_gui_agent.perception.screenshot import annotate_screenshot
 
         img = Image.new("RGB", (800, 600), color=(255, 255, 255))
-        # 31 条互不相同的 OCR 文字。注意：文本不能包含任务关键词，
+        # 41 条互不相同的 OCR 文字。注意：文本不能包含任务关键词，
         # 否则会被 _is_ocr_noise 当作噪声过滤（task 会加入噪声模式）。
         ocr = [
             {"text": f"按钮{i:02d}", "bbox": (50, 10 + i * 10, 150, 35 + i * 10), "confidence": 0.9}
-            for i in range(31)
+            for i in range(41)
         ]
         _, marker_map = annotate_screenshot(img, ocr, task="", uia_controls=[])
-        assert ANNOTATE_MAX_ITEMS == 30
-        assert len(marker_map) == 30  # 超出的第 31 条被截断
+        assert ANNOTATE_MAX_ITEMS == 40
+        assert len(marker_map) == 40  # 超出的第 41 条被截断
 
     def test_uia_marker_keeps_control_name(self):
         """UIA 标注应保留控件文字，供模型核对"编号=含义"（防猜按钮）"""
