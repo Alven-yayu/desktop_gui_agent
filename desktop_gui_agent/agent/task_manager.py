@@ -272,13 +272,49 @@ class TaskManager:
             return ""
 
     @staticmethod
+    def _calculator_display_hint() -> str:
+        """读取计算器显示区内容（表达式 + 结果），注入模型上下文。
+
+        背景：计算器界面有两行——表达式区（上行）和结果区（下行），模型从截图
+        OCR 看不全（尤其运算符如 + 难识别），导致误判当前算式状态（如以为
+        "1+1" 还缺一个 1 而重复输入）。UIA 能精确读到显示区文字
+        （"表达式为 X"、"显示为 Y"），直接注入让模型知道真实状态。
+
+        Returns:
+            形如 "【计算器状态】表达式为 1+1，显示为 2\n" 的提示；非计算器
+            窗口或读取失败返回空串。
+        """
+        try:
+            from desktop_gui_agent.perception.uia_parser import UiaParser
+            controls = UiaParser.get_foreground_controls()
+        except Exception:
+            return ""
+        expr, result = "", ""
+        for c in controls:
+            name = str(c.get("name", "") or "")
+            if name.startswith("表达式为"):
+                expr = name
+            elif name.startswith("显示为"):
+                result = name
+        if not expr and not result:
+            return ""
+        parts = [p for p in (expr, result) if p]
+        return "【计算器状态】" + "，".join(parts) + "\n"
+
+    @staticmethod
     def _extract_open_target(task: str) -> str:
         """从"打开X"类任务中提取目标应用名；非此类任务或目标模糊时返回空串。
 
         规则：
-        - 匹配"打开/启动/开启/运行"后紧跟的名称（到标点/空格为止）。
+        - 匹配"打开/启动/开启/运行"后紧跟的名称。
+        - 复合任务在第一个动作词（输入/搜索/查找等）处截断，
+          如"打开记事本输入Hello"→"记事本"、"打开浏览器搜索Python"→"浏览器"。
         - 名称过长（>8 字）、过短（<2 字）、或含功能词（的/里/文件/文档等，
           如"打开桌面上的测试文档"）视为模糊目标，不返回（不触发守卫）。
+
+        背景：守卫(_open_task_search_guard)依赖此函数拦截"搜索界面点击"。
+        若复合任务提取失败返回空串，守卫会误判为"非打开X任务"而放行，
+        模型就会在搜索/开始菜单界面用 OCR 坐标乱点（曾点中 Excel 磁贴）。
 
         Args:
             task: 用户任务文本。
@@ -288,18 +324,20 @@ class TaskManager:
         """
         if not task:
             return ""
+        # 先按空格/标点切出"打开"后第一个词段（"打开计算器，输入 1+1"→"计算器"）。
         m = re.search(r"(?:打开|启动|开启|运行)\s*([^\s，。,!?！？]+)", task)
         if not m:
             return ""
         target = m.group(1)
-        # 剥离动作词后缀：复合任务"打开浏览器搜索X"→"浏览器"、"打开记事本输入Y"→"记事本"、
-        # "打开计算器计算Z"→"计算器"。用 $ 锚定只剥结尾的动作词，避免拆开应用名本身
-        # （如"计算器"含"计算"，但"计算器"是应用名，不能拆成""+"器"）。
-        target = re.sub(
-            r"(?:搜索|输入|查找|点击|选择|打开|设置|查看|计算|运行|启动|进入|新建|双击)$",
-            "",
+        # 复合任务：词段内若含动作词，在其处截断（"记事本输入Hello"→"记事本"、
+        # "计算器计算"→"计算器"）。非贪婪匹配，应用名本身含动作词前缀也安全
+        # （"计算器"含"计算"但"计算器"不是"计算"后紧跟，不会误截）。
+        m_act = re.match(
+            r"(.+?)(?:搜索|输入|查找|点击|选择|设置|查看|计算|运行|启动|进入|新建|双击|创建)",
             target,
-        ).strip()
+        )
+        if m_act:
+            target = m_act.group(1)
         if len(target) > 8 or len(target) < 2:
             return ""
         if any(w in target for w in ("的", "里", "中", "内", "文件", "文档", "目录")):
@@ -333,11 +371,23 @@ class TaskManager:
         if "搜索" in title or title in ("开始", "Start"):
             # 搜索界面：点选结果不可靠 → 拦截，改在已打开的搜索框直接输入应用名。
             # 不再建议按 win（搜索已打开，再按会空转）。
-            self._bad_marker_hint = (
-                f"【!!! 纠正 — 搜索框已打开，直接输入应用名 !!!】\n"
-                f"当前是搜索界面，点选搜索结果不可靠。搜索框已聚焦，请直接 "
-                f"type(\"{target}\") 并回车打开，不要再按 win。\n\n"
-            )
+            # 若上一步已输入过目标文本（搜索框已有内容），引导直接回车打开，
+            # 避免重复输入造成"记事本记事本"叠加、回车打开错误应用。
+            if self._last_type_text == target:
+                self._bad_marker_hint = (
+                    f"【!!! 纠正 — 已输入“{target}”，直接回车打开 !!!】\n"
+                    f"当前是搜索界面，你已输入“{target}”（搜索框已有内容）。\n"
+                    f"请直接 hotkey(enter) 回车打开，不要重复输入，不要点搜索结果。\n\n"
+                )
+                logger.warning(
+                    f"[OpenGuard] 搜索已输入 {target}，引导回车（前台={title!r}）"
+                )
+            else:
+                self._bad_marker_hint = (
+                    f"【!!! 纠正 — 搜索框已打开，直接输入应用名 !!!】\n"
+                    f"当前是搜索界面，点选搜索结果不可靠。搜索框已聚焦，请直接 "
+                    f"type(\"{target}\") 并回车打开，不要再按 win。\n\n"
+                )
             logger.warning(
                 f"[OpenGuard] 拦截搜索界面点击，改为直接输入 {target}（前台={title!r}）"
             )
@@ -353,6 +403,81 @@ class TaskManager:
         )
         logger.warning(
             f"[OpenGuard] 拦截无关窗口点击，改用搜索打开 {target}（前台={title!r}）"
+        )
+        return False
+
+    @staticmethod
+    def _is_calc_task(task: str) -> bool:
+        """判断任务是否是"计算X"类任务（需操作计算器）。
+
+        匹配含"计算/算/加减乘除"等计算意图词的任务。
+        返回 True 时，对计算器的按键点击应改为一次性 type 输入。
+
+        Args:
+            task: 用户任务文本。
+
+        Returns:
+            True 表示是计算类任务。
+        """
+        if not task:
+            return False
+        return any(k in task for k in ("计算", "算一下", "算出", "1+", "1-", "等于"))
+
+    @staticmethod
+    def _is_calculator_button(info: dict) -> bool:
+        """判断标注是否属于计算器按键（数字/运算符/等于等）。
+
+        通过控件类型和名称判断：计算器按键是 Button，名称多为
+        中文数字（一/二/三）、运算符（加/减/乘以/除以）或符号（等于）。
+
+        Args:
+            info: 标注信息字典。
+
+        Returns:
+            True 表示是计算器按键。
+        """
+        if not info:
+            return False
+        if info.get("source") != "uia":
+            return False
+        name = str(info.get("text", "") or "")
+        # 计算器按键名：中文数字/运算符/等于/清除等
+        _CALC_KEYS = (
+            "一", "二", "三", "四", "五", "六", "七", "八", "九", "零",
+            "加", "减", "乘以", "除以", "等于", "百分比", "平方", "平方根",
+            "倒数", "清除", "清除条目", "Backspace", "正负", "十进制分隔符",
+        )
+        return any(name == k or name.startswith(k) for k in _CALC_KEYS)
+
+    def _calculator_click_guard(self, marker: int) -> bool:
+        """计算器按键点击守卫：任务要"计算X"时，禁止逐个点按键，改用 type 一次性输入。
+
+        背景：计算器按键密集，模型逐键点击时看不到完整算式状态（尤其运算符
+        OCR 难识别），容易误判重复输入（如"1+1"以为缺1又点一下变"11+1"）。
+        一次性 type("1+1", enter=True) 最可靠，不依赖逐键点击和每步感知。
+
+        Returns:
+            True 表示放行点击（非计算器场景）；False 表示已拦截（提示用 type）。
+        """
+        task = str(getattr(self, "_current_task", "") or "")
+        if not self._is_calc_task(task):
+            return True
+        if "计算器" not in (self._foreground_title() or ""):
+            return True
+        info = self._marker_map.get(marker, {})
+        if not self._is_calculator_button(info):
+            return True
+        # 拦截计算器按键点击，提示用 type 一次性输入算式
+        self._bad_marker_hint = (
+            "【!!! 纠正 — 计算器不要逐个点按钮，用 type 一次性输入算式 !!!】\n"
+            "计算器按键逐个点击不可靠（看不到完整算式，易误判重复输入）。\n"
+            f"请直接 type(text=\"完整算式\", enter=True) 一次性输入并回车计算，"
+            "例如 type(text=\"1+1\", enter=True)。\n"
+            "不要点击任何数字/运算符按钮。\n\n"
+        )
+        logger.warning(
+            f"[CalcGuard] 拦截计算器按键点击 #{marker} "
+            f"\"{info.get('text', '')}\"，改用 type 输入"
         )
         return False
 
@@ -419,6 +544,10 @@ class TaskManager:
         params = action.get("params", {})
 
         if action_type in ("click_marker", "double_click_marker", "right_click_marker"):
+            # 计算器按键守卫：任务要"计算X"且前台是计算器时，禁止逐个点按键，
+            # 强制模型改用 type("算式", enter=True) 一次性输入。
+            if not self._calculator_click_guard(params["marker"]):
+                return False
             # 打开应用守卫：任务要"打开X"且目标未在前台 → 拦截点击，强制键盘搜索。
             # 防"点计算器结果却打开Word"这类点击落点不可靠问题。
             if not self._open_task_search_guard():
@@ -493,13 +622,16 @@ class TaskManager:
         elif action_type == "type":
             text = params["text"]
             enter = bool(params.get("enter"))
-            # 防重复输入守卫：连续两次 type 相同文本且 enter 设置相同 → 拦截。
-            # 治"模型在浏览器里把搜索词输了两遍"这类问题（第一遍其实已生效，
-            # 模型没看结果又补了一遍，导致输入重复/叠加）。
-            if self._last_type_text == text and self._last_type_enter == enter:
+            # 防重复输入守卫：只要文本与上一步相同就拦截（无论是否带 enter）。
+            # 背景：模型常"上一步已输入成功，没看结果又补一遍"，导致文本重复叠加
+            # （如搜索框"记事本"→"记事本记事本"，回车打开错误应用）。
+            # 只看文本不看 enter：因为重复输入相同文本本身几乎总是错误——若上一步
+            # 输入已生效，重复是叠加；若未生效，应观察屏幕换方法而非原样重输。
+            if self._last_type_text == text:
                 self._bad_marker_hint = (
                     f"【!!! 纠正 — 你已经输入过“{text}”，不要重复输入 !!!】\n"
-                    f"上一步已输入“{text}”，请等待结果并观察屏幕变化，不要再输入同一内容。\n\n"
+                    f"上一步已输入“{text}”，请等待结果并观察屏幕变化，不要再输入同一内容。\n"
+                    f"若上一步输入未生效（如搜索框无内容），先点击输入框聚焦再输入。\n\n"
                 )
                 logger.warning(f"[RepeatGuard] 拦截重复输入: {text!r} enter={enter}")
                 return False
@@ -509,6 +641,13 @@ class TaskManager:
             # type(..., enter=True)：输入后立即回车确认（搜索/地址栏/算式等）。
             # 一次动作完成，避免模型在两步之间做多余的中间判断。
             if ok and enter:
+                # 计算器场景：输入算式前先清空显示区（按 C），避免上一步残留
+                # 输入叠加（如已有"2+1"再输入"1+1"变"2+11+1"）。
+                if self._is_calc_task(str(getattr(self, "_current_task", "") or "")) and \
+                        "计算器" in (self._foreground_title() or ""):
+                    self.keyboard.press("c")
+                    time.sleep(0.2)
+                    logger.info("[CalcGuard] type 前已清空计算器显示区")
                 self.keyboard.press("enter")
             return ok
         elif action_type == "scroll":
@@ -1188,6 +1327,12 @@ class TaskManager:
                         uia_controls=uia_controls, is_desktop=is_desktop,
                     )
                 self._marker_map = marker_map  # 保存供 _dispatch 翻译编号
+                # 保存标注后的截图（模型实际看到的画面），排查"乱点/幻觉"时
+                # 可对照编号与真实标注。原图保存在 step_{N}.png，标注图 step_{N}_annotated.png。
+                try:
+                    self._save_screenshot(annotated_image, step, suffix="_annotated")
+                except Exception as e:
+                    logger.debug(f"保存标注截图失败: {e}")
                 # 构建标注文字说明（区分 UIA 矩形框和 OCR 圆点）
                 def _build_marker_line(num: int, info: dict) -> str:
                     source = info.get("source", "?")
@@ -1237,6 +1382,12 @@ class TaskManager:
                 except Exception:
                     path_line = ""
 
+                # 计算器显示区：UIA 精确读"表达式为 X / 显示为 Y"，注入让模型
+                # 知道真实算式状态，避免从截图猜两行显示而误判重复输入。
+                calc_hint = ""
+                if "计算器" in fg_window_title or "计算器" in task:
+                    calc_hint = self._calculator_display_hint()
+
                 # 上一步模型输出了无效标注编号 → 注入针对性纠正提示
                 bad_marker_hint = self._bad_marker_hint
                 self._bad_marker_hint = ""  # 用后重置，避免重复
@@ -1257,6 +1408,7 @@ class TaskManager:
                     anchor_extra +
                     cursor_line +
                     path_line +
+                    calc_hint +
                     f"【当前前台窗口】{fg_window_title}\n"
                 )
                 # 标注说明仅在有标注时追加（含 0 个标注的空桌面）
@@ -1375,6 +1527,15 @@ class TaskManager:
                             f"[Verify] 步骤{step} 无状态变化 "
                             f"(连续{consecutive_no_change}次)"
                         )
+                        # 动作未产生任何屏幕变化（type 打空/点击未生效）时，重置
+                        # 重复输入守卫。否则模型想重试"上次没生效的输入"会被
+                        # RepeatGuard 误判为重复而拦截，陷入"不能点也不能输"死循环。
+                        if not success:
+                            self._last_type_text = ""
+                            self._last_type_enter = False
+                            logger.info(
+                                f"[Verify] 步骤{step} 动作未生效，重置重复输入守卫"
+                            )
                     else:
                         if consecutive_no_change > 0:
                             logger.info(
@@ -1448,19 +1609,20 @@ class TaskManager:
             # 保存完整历史记录
             self._save_history(history, task)
 
-    def _save_screenshot(self, image: Image.Image, step: int) -> str:
+    def _save_screenshot(self, image: Image.Image, step: int, suffix: str = "") -> str:
         """保存截图到 logs/screenshots/ 目录。
 
         Args:
             image: 截图 PIL Image。
             step: 当前步骤编号。
+            suffix: 文件名后缀（如 "_annotated" 表示标注后的图），空则原图。
 
         Returns:
             截图保存路径。
         """
         log_dir = PlatformInfo.get_log_dir() / "screenshots"
         os.makedirs(log_dir, exist_ok=True)
-        path = os.path.join(log_dir, f"step_{step}.png")
+        path = os.path.join(log_dir, f"step_{step}{suffix}.png")
         image.save(path, "PNG")
         return path
 
