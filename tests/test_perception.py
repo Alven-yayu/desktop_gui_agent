@@ -239,20 +239,19 @@ class TestAnnotateOcrClickPoint:
         assert cp[1] < 65  # 文字中心 y=65，上偏后必须在其上方
 
     def test_max_items_defaults_from_config(self):
-        """默认最多标注 ANNOTATE_MAX_ITEMS 个元素（40）"""
+        """默认最多标注 ANNOTATE_MAX_ITEMS 个元素"""
         from desktop_gui_agent.config import ANNOTATE_MAX_ITEMS
         from desktop_gui_agent.perception.screenshot import annotate_screenshot
 
         img = Image.new("RGB", (800, 600), color=(255, 255, 255))
-        # 41 条互不相同的 OCR 文字。注意：文本不能包含任务关键词，
+        # max_items+1 条互不相同的 OCR 文字。注意：文本不能包含任务关键词，
         # 否则会被 _is_ocr_noise 当作噪声过滤（task 会加入噪声模式）。
         ocr = [
             {"text": f"按钮{i:02d}", "bbox": (50, 10 + i * 10, 150, 35 + i * 10), "confidence": 0.9}
-            for i in range(41)
+            for i in range(ANNOTATE_MAX_ITEMS + 1)
         ]
         _, marker_map = annotate_screenshot(img, ocr, task="", uia_controls=[])
-        assert ANNOTATE_MAX_ITEMS == 40
-        assert len(marker_map) == 40  # 超出的第 41 条被截断
+        assert len(marker_map) == ANNOTATE_MAX_ITEMS  # 超出的最后一条被截断
 
     def test_uia_marker_keeps_control_name(self):
         """UIA 标注应保留控件文字，供模型核对"编号=含义"（防猜按钮）"""
@@ -265,3 +264,48 @@ class TestAnnotateOcrClickPoint:
         _, marker_map = annotate_screenshot(img, [], task="", uia_controls=uia)
         assert marker_map[1]["source"] == "uia"
         assert marker_map[1]["text"] == "二"
+
+    def test_ocr_warm_up_starts_worker(self):
+        """warm_up 应触发 OCR 子进程启动（提前预热冷启动，避免首步卡死）"""
+        from unittest.mock import MagicMock
+        import desktop_gui_agent.perception.ocr_recognizer as ocr_mod
+        mock_worker = MagicMock()
+        mock_worker._ensure_started.return_value = True
+        ocr_mod._worker = mock_worker
+        assert ocr_mod.warm_up() is True
+        mock_worker._ensure_started.assert_called_once()
+        ocr_mod._worker = None
+
+    def test_ocr_warm_up_failure_returns_false(self):
+        """worker 启动失败时 warm_up 返回 False（agent 降级纯 UIA）"""
+        from unittest.mock import MagicMock
+        import desktop_gui_agent.perception.ocr_recognizer as ocr_mod
+        mock_worker = MagicMock()
+        mock_worker._ensure_started.return_value = False
+        ocr_mod._worker = mock_worker
+        assert ocr_mod.warm_up() is False
+        ocr_mod._worker = None
+
+    def test_annotation_reserves_ocr_slots_when_uia_dense(self):
+        """UIA 控件占满上限时，OCR 仍有预留名额——任务目标文字（如桌面"QQ音乐"
+        图标）不被 UIA 桌面图标饿死，保证有稳定编号可点"""
+        from desktop_gui_agent.perception.screenshot import annotate_screenshot
+        from desktop_gui_agent.config import ANNOTATE_OCR_RESERVED
+        img = Image.new("RGB", (800, 600), color=(255, 255, 255))
+        # 70 个 UIA 图标（远超标注上限，模拟密集桌面）
+        uia = [
+            {"name": f"图标{i}", "control_type": "Button",
+             "bbox": (10 + i * 15, 10, 20 + i * 15, 30),
+             "click_point": (15 + i * 15, 20)}
+            for i in range(70)
+        ]
+        ocr = [{"text": "QQ音乐", "bbox": (500, 400, 560, 430), "confidence": 0.99}]
+        _, marker_map = annotate_screenshot(
+            img, ocr, task="打开QQ音乐", uia_controls=uia
+        )
+        texts = [m["text"] for m in marker_map.values()]
+        assert "QQ音乐" in texts  # 目标文字一定有编号（不被 UIA 桌面图标饿死）
+        uia_count = sum(1 for m in marker_map.values() if m["source"] == "uia")
+        # UIA 不能占用预留的 OCR 名额
+        from desktop_gui_agent.config import ANNOTATE_MAX_ITEMS
+        assert uia_count <= ANNOTATE_MAX_ITEMS - ANNOTATE_OCR_RESERVED

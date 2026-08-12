@@ -153,6 +153,27 @@ class _OcrWorker:
 _worker = None
 
 
+def warm_up() -> bool:
+    """预热 OCR 子进程：提前拉起 worker 并等引擎就绪。
+
+    首次启动 worker 需加载 PaddleOCR（GPU）约 20~70s。若等首次截图才启动，
+    首个动作会因冷启动慢到像卡死（用户无法判断程序是否在运行）。
+    在任务启动时预热，把耗时放在"预热"阶段并打出明确日志。
+
+    Returns:
+        True 表示 OCR 已就绪可用。
+    """
+    global _worker
+    if _worker is None:
+        _worker = _OcrWorker()
+    ok = _worker._ensure_started()
+    if ok:
+        logger.info("OCR 引擎已就绪（预热完成）")
+    else:
+        logger.warning("OCR 引擎预热失败，将降级为纯 UIA 标注")
+    return ok
+
+
 def recognize(image: Image.Image) -> List[Dict[str, Any]]:
     """识别图片中的文字，返回结构化结果。
 

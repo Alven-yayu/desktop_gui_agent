@@ -272,6 +272,48 @@ class TaskManager:
             return ""
 
     @staticmethod
+    def _foreground_class() -> str:
+        """获取当前前台窗口的类名（仅 Windows；失败返回空串）。
+
+        用于区分"桌面 shell"与普通应用窗口：桌面 shell 的类名是
+        Progman / WorkerW，标题可能是 "Program Manager" 也可能是空串
+        （Win11 的 WorkerW 标题为空），只认标题会误判。
+        """
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                return ""
+            buf = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetClassNameW(hwnd, buf, 256)
+            return buf.value
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _is_desktop_shell(title: str, fg_class: str) -> bool:
+        """判断前台窗口是否为桌面 shell。
+
+        Win11 桌面 shell 有两种形态：Progman（标题 "Program Manager"）和
+        WorkerW（标题为空串）。只认空标题会把 Progman 误判成应用窗口（open-guard
+        拦截桌面图标点击、is_desktop 不生效导致偏移/双击失效）。统一用
+        标题 + 窗口类判定，open-guard 与标注层共用同一套逻辑。
+
+        Args:
+            title: 前台窗口标题。
+            fg_class: 前台窗口类名。
+
+        Returns:
+            True 表示前台是桌面 shell（应允许桌面图标点击/按桌面语义标注）。
+        """
+        title = (title or "").strip()
+        return (
+            not title
+            or fg_class in ("Progman", "WorkerW")
+            or title in ("Program Manager", "桌面")
+        )
+
+    @staticmethod
     def _calculator_display_hint() -> str:
         """读取计算器显示区内容（表达式 + 结果），注入模型上下文。
 
@@ -392,8 +434,10 @@ class TaskManager:
                 f"[OpenGuard] 拦截搜索界面点击，改为直接输入 {target}（前台={title!r}）"
             )
             return False
-        if title in ("Program Manager", "桌面"):
-            # 桌面：应用图标可以点，是否正确由 _marker_click_guard 核对
+        # 桌面：应用图标可以点，是否正确由 _marker_click_guard 核对。
+        # 判定用 _is_desktop_shell（窗口类 + 标题双保险）：只认标题会把空标题
+        # / Progman 桌面误判成"无关窗口"而拦截桌面图标点击（打开桌面应用会失败）。
+        if self._is_desktop_shell(title, self._foreground_class()):
             return True
         # 其他无关应用窗口 → 拦截，用搜索打开
         self._bad_marker_hint = (
@@ -570,6 +614,11 @@ class TaskManager:
             x, y = pos
             if action_type == "click_marker":
                 self._marker_log("click_marker", params["marker"], x, y)
+                # 桌面上点图标自动双击：桌面图标单击只选中不打开，模型常因
+                # "点了没反应"误判失败而退回搜索。桌面语义统一为双击打开，
+                # 无需模型记住"桌面图标要双击"（通用能力，覆盖所有桌面图标）。
+                if getattr(self, "_is_desktop", False):
+                    return self.mouse.double_click(x, y)
                 return self.mouse.click(x, y)
             elif action_type == "double_click_marker":
                 self._marker_log("double_click_marker", params["marker"], x, y)
@@ -678,6 +727,11 @@ class TaskManager:
         last_error = None
         for attempt in range(max_retries + 1):  # 原始 + 重试
             try:
+                # 每一步都重新执行终端最小化：运行中途用户可能把终端（或其它
+                # 本进程窗口）点回前台，导致 OCR 读到终端内容、前台判定成"非桌面"
+                # 而让桌面图标点击路径失效。每步重试让感知始终干净。
+                from desktop_gui_agent.perception.screenshot import _init_terminal_avoidance
+                _init_terminal_avoidance()
                 return capture()
             except ScreenshotError as e:
                 last_error = e
@@ -1007,6 +1061,27 @@ class TaskManager:
                (top - margin) <= cy <= (bottom + margin)
 
     @staticmethod
+    def _ordered_uia_controls(foreground: list, taskbar: list, no_crop: bool) -> list:
+        """决定 UIA 控件标注顺序：系统级任务优先标注任务栏/系统托盘。
+
+        标注有 max_items 上限（ANNOTATE_MAX_ITEMS），桌面图标多时任务栏控件
+        会被挤出标注（如音量图标排桌面图标之后，40 上限一到就没了），模型因此
+        看不到托盘目标而幻觉乱点桌面图标。系统级任务（音量/回收站/任务栏/托盘等，
+        即 no_crop）目标区在任务栏/托盘，让它们排前面；普通任务保持前台窗口控件在前。
+
+        Args:
+            foreground: 前台窗口的 UIA 控件列表。
+            taskbar: 任务栏/系统托盘的 UIA 控件列表。
+            no_crop: 是否为系统级任务（不做窗口裁剪）。
+
+        Returns:
+            按标注优先级排序后的控件列表。
+        """
+        if no_crop:
+            return taskbar + foreground
+        return foreground + taskbar
+
+    @staticmethod
     def _expand_rect(rect: tuple, margin: int, image_size: tuple) -> Optional[tuple]:
         """把窗口矩形外扩 margin 像素，并裁剪到图片边界内。
 
@@ -1188,6 +1263,12 @@ class TaskManager:
         # （每次 run() 调用时执行一次，防止 OCR 自干扰）
         from desktop_gui_agent.perception.screenshot import _init_terminal_avoidance
         _init_terminal_avoidance()
+        # OCR 引擎预热：首步 OCR 冷启动（PaddleOCR GPU 加载）约 20~70s。
+        # 若等首次截图才启动，第一个动作会慢到像卡死。提前预热并把进度
+        # 打出来，用户能确认程序在运行。
+        from desktop_gui_agent.perception.ocr_recognizer import warm_up
+        logger.info("OCR 引擎预热中（首次约需 20~70s 加载模型，请稍候）…")
+        warm_up()
 
         # 任务开始锚点：记录终端最小化之后的前台窗口。
         # 短暂等待最小化生效、前台窗口切换稳定后再捕获——与"运行任务先最小化
@@ -1253,10 +1334,12 @@ class TaskManager:
                     uia_controls = UiaParser.get_foreground_controls()
                 except Exception as e:
                     logger.debug(f"UIA 感知跳过: {e}")
-                # 补充任务栏/系统托盘控件：前台窗口 UIA 覆盖不到音量图标等
-                # 小目标（它们属于任务栏窗口），合并后标注能给它们精确坐标。
+                # 任务栏/系统托盘控件：前台窗口 UIA 覆盖不到音量图标等小目标。
+                # 单独保存，标注顺序由 _ordered_uia_controls 决定（系统级任务
+                # 优先标注任务栏，避免被标注上限挤掉）。
+                taskbar_controls = []
                 try:
-                    uia_controls += UiaParser.get_taskbar_controls()
+                    taskbar_controls = UiaParser.get_taskbar_controls()
                 except Exception as e:
                     logger.debug(f"UIA 任务栏感知跳过: {e}")
 
@@ -1277,9 +1360,24 @@ class TaskManager:
                 except Exception:
                     pass
 
-                # 桌面判断：前台窗口无标题说明当前在桌面（没有应用窗口）。
+                # 桌面判断：前台是桌面 shell 即认为在桌面——无标题的 WorkerW，
+                # 或标题为 "Program Manager" 的 Progman（Win11 桌面 shell 有两种
+                # 形态，只认空标题会把 Progman 误判成应用窗口，导致桌面图标偏移
+                # 与自动双击不生效、点在文字上打不开）。
                 # 桌面上 OCR 点击点需上偏以落在图标上；应用内取文字中心。
-                is_desktop = not bool(fg_window_title.strip())
+                fg_class = ""
+                try:
+                    import ctypes
+                    cls_buf = ctypes.create_unicode_buffer(256)
+                    ctypes.windll.user32.GetClassNameW(fg_hwnd, cls_buf, 256)
+                    fg_class = cls_buf.value
+                except Exception:
+                    pass
+                is_desktop = self._is_desktop_shell(fg_window_title, fg_class)
+                # 保存供 dispatch 使用：桌面上点图标要自动双击打开
+                # （桌面图标单击只选中不打开，模型若用 click_marker 会"点了没反应"，
+                # 进而误判失败退回搜索——这是通用能力，不是给特定应用的特例）。
+                self._is_desktop = is_desktop
 
                 # 获取前台窗口矩形：把标注聚焦到窗口区域。
                 # 完整桌面标注时，小窗口按钮的编号是稀疏大号（如28、29），
@@ -1288,6 +1386,12 @@ class TaskManager:
                 # 但系统级任务（音量/回收站等）目标在任务栏/托盘，裁剪会裁掉，
                 # 此时跳过裁剪保留完整上下文。
                 no_crop = any(kw in task for kw in ANNOTATE_NO_CROP_KEYWORDS)
+                # 系统级任务（音量/回收站/任务栏/托盘等）：目标区在任务栏/托盘，
+                # 优先标注任务栏控件，避免被标注上限前的桌面图标挤掉（音量图标
+                # 上次就被挤出标注，模型看不到托盘目标而幻觉乱点桌面图标）。
+                uia_controls = self._ordered_uia_controls(
+                    uia_controls, taskbar_controls, no_crop=no_crop
+                )
                 fg_rect = None
                 if not is_desktop and not no_crop:
                     fg_rect = self._get_foreground_window_rect()

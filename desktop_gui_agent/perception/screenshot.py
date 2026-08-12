@@ -18,7 +18,9 @@ from typing import List, Optional, Tuple
 import mss
 from PIL import Image
 
-from desktop_gui_agent.config import ANNOTATE_MAX_ITEMS, SCREEN_ID, SCREENSHOT_REGION
+from desktop_gui_agent.config import (
+    ANNOTATE_MAX_ITEMS, ANNOTATE_OCR_RESERVED, SCREEN_ID, SCREENSHOT_REGION,
+)
 from desktop_gui_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -486,8 +488,13 @@ def annotate_screenshot(
     marker_num = 1
 
     # ===== 第一轮：UIA 控件 → 绿色矩形框 =====
+    # 给 OCR 预留固定名额（ANNOTATE_OCR_RESERVED）：桌面图标等 UIA 密集场景
+    # 会占满 max_items，任务目标文字（OCR 识别）就一个编号都拿不到，模型找不到
+    # 目标而幻觉乱点。预留后 UIA 最多占 max_items-reserved，OCR 至少拿 reserved 个。
+    # OCR 按任务关键词排序，目标文字总是排最前 → 拿到稳定编号。
+    uia_cap = max_items - ANNOTATE_OCR_RESERVED
     for ctrl in uia_controls:
-        if marker_num > max_items:
+        if marker_num > uia_cap:
             break
 
         left, top, right, bottom = ctrl["bbox"]

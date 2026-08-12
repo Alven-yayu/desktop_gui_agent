@@ -689,6 +689,46 @@ class TestTaskManagerDispatch:
         mock_mouse.click.assert_called_once_with(100, 200)
         assert result is True
 
+    def test_dispatch_click_marker_desktop_auto_double_click(self):
+        """桌面上点击图标 → 自动双击（桌面图标单击只选中不打开，否则模型
+        "点了没反应"误判失败退回搜索）"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.double_click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开QQ音乐"
+        tm._is_desktop = True
+        tm._marker_map = {
+            38: {"click_point": (137, 779), "text": "QQ音乐", "source": "ocr"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value=""), \
+             patch.object(TaskManager, "_foreground_class", return_value="Progman"):
+            result = tm._dispatch(
+                {"action_type": "click_marker",
+                 "params": {"marker": 38, "text": "QQ音乐"}}
+            )
+        mock_mouse.double_click.assert_called_once_with(137, 779)
+        mock_mouse.click.assert_not_called()
+        assert result is True
+
+    def test_dispatch_click_marker_in_app_single_click(self):
+        """应用窗口内点击 → 保持单击（只有桌面图标才双击）"""
+        from unittest.mock import MagicMock
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "关闭当前窗口"
+        tm._is_desktop = False
+        tm._marker_map = {2: {"click_point": (50, 60), "text": "关闭"}}
+        result = tm._dispatch(
+            {"action_type": "click_marker", "params": {"marker": 2, "text": "关闭"}}
+        )
+        mock_mouse.click.assert_called_once_with(50, 60)
+        mock_mouse.double_click.assert_not_called()
+        assert result is True
+
     def test_dispatch_type_calls_keyboard(self):
         """type 动作应调用 keyboard.type(text)"""
         from unittest.mock import MagicMock
@@ -957,7 +997,8 @@ class TestTaskManagerDispatch:
         tm._marker_map = {
             10: {"click_point": (848, 413), "text": "计算器", "source": "ocr"}
         }
-        with patch.object(TaskManager, "_foreground_title", return_value="Microsoft Word"):
+        with patch.object(TaskManager, "_foreground_title", return_value="Microsoft Word"), \
+             patch.object(TaskManager, "_foreground_class", return_value="OpusApp"):
             result = tm._dispatch(
                 {"action_type": "click_marker", "params": {"marker": 10}}
             )
@@ -1051,6 +1092,47 @@ class TestTaskManagerDispatch:
             24: {"click_point": (500, 600), "text": "Google Chrome", "source": "ocr"}
         }
         with patch.object(TaskManager, "_foreground_title", return_value="Program Manager"):
+            result = tm._dispatch(
+                {"action_type": "click_marker",
+                 "params": {"marker": 24, "text": "Google Chrome"}}
+            )
+        mock_mouse.click.assert_called_once_with(500, 600)
+        assert result is True
+
+    def test_open_search_guard_allows_desktop_icon_empty_title(self):
+        """桌面 shell 空标题（Win11 WorkerW 常见）→ 桌面图标点击放行，不误拦。
+        回归：修复前空标题被误判成"无关窗口"，桌面 QQ音乐 图标点击被拦截致死循环。"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开QQ音乐"
+        tm._marker_map = {
+            38: {"click_point": (137, 779), "text": "QQ音乐", "source": "ocr"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value=""), \
+             patch.object(TaskManager, "_foreground_class", return_value="Progman"):
+            result = tm._dispatch(
+                {"action_type": "click_marker",
+                 "params": {"marker": 38, "text": "QQ音乐"}}
+            )
+        mock_mouse.click.assert_called_once_with(137, 779)
+        assert result is True
+
+    def test_open_search_guard_allows_desktop_workerw_class(self):
+        """WorkerW 类名（Win11 桌面）即使标题非 Program Manager 也放行"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_mouse = MagicMock()
+        mock_mouse.click.return_value = True
+        tm = TaskManager(mouse=mock_mouse)
+        tm._current_task = "打开浏览器搜索 Python"
+        tm._marker_map = {
+            24: {"click_point": (500, 600), "text": "Google Chrome", "source": "ocr"}
+        }
+        with patch.object(TaskManager, "_foreground_title", return_value="某应用窗口"), \
+             patch.object(TaskManager, "_foreground_class", return_value="WorkerW"):
             result = tm._dispatch(
                 {"action_type": "click_marker",
                  "params": {"marker": 24, "text": "Google Chrome"}}
@@ -1362,6 +1444,45 @@ class TestTaskManagerPerceptionHelpers:
         from desktop_gui_agent.agent.task_manager import TaskManager
         with patch("ctypes.windll.user32.GetForegroundWindow", side_effect=AttributeError):
             assert TaskManager._get_foreground_window_rect() is None
+
+    def test_ordered_uia_controls_system_task_prioritizes_taskbar(self):
+        """系统级任务（no_crop）任务栏/托盘控件排前面，不被桌面控件挤掉"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        fg = [{"name": "Slay the Spire 2"}, {"name": "此电脑"}, {"name": "回收站"}]
+        tb = [{"name": "开始"}, {"name": "音量"}, {"name": "时钟"}]
+        ordered = TaskManager._ordered_uia_controls(fg, tb, no_crop=True)
+        assert ordered[0]["name"] == "开始"      # 任务栏最前
+        assert ordered[1]["name"] == "音量"
+        assert ordered[-1]["name"] == "回收站"   # 桌面控件殿后
+        assert "音量" in [c["name"] for c in ordered[:3]]
+
+    def test_ordered_uia_controls_normal_task_keeps_foreground_first(self):
+        """普通任务保持前台窗口控件在前（任务栏仍追加在尾部）"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        fg = [{"name": "记事本"}, {"name": "按钮"}]
+        tb = [{"name": "音量"}, {"name": "时钟"}]
+        ordered = TaskManager._ordered_uia_controls(fg, tb, no_crop=False)
+        assert ordered[0]["name"] == "记事本"
+        assert ordered[1]["name"] == "按钮"
+        assert ordered[2]["name"] == "音量"
+        assert ordered[3]["name"] == "时钟"
+
+    def test_is_desktop_shell_empty_title(self):
+        """空标题（Win11 WorkerW 桌面）→ 桌面"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        assert TaskManager._is_desktop_shell("", "WorkerW") is True
+
+    def test_is_desktop_shell_program_manager(self):
+        """标题 "Program Manager"（Progman 桌面）→ 桌面。
+        回归：修复前只认空标题，Progman 被误判成应用窗口导致桌面图标偏移/
+        自动双击不生效、点在文字上打不开。"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        assert TaskManager._is_desktop_shell("Program Manager", "Progman") is True
+
+    def test_is_desktop_shell_app_window_false(self):
+        """普通应用窗口（有标题非桌面类）→ 非桌面"""
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        assert TaskManager._is_desktop_shell("计算器", "ApplicationFrameWindow") is False
 
 
 class TestTaskManagerRun:
@@ -2224,6 +2345,14 @@ class TestPromptBuilding:
         import desktop_gui_agent.config as config
         assert "hotkey(alt, f4)" in config.PROMPT_SYSTEM  # 关闭窗口
         assert "hotkey(ctrl, v)" in config.PROMPT_SYSTEM  # 粘贴
+
+    def test_prompt_has_slider_principle(self):
+        """PROMPT 应包含通用滑块设值原则（UIA set_control，不靠目测拖动）"""
+        import desktop_gui_agent.config as config
+        assert "set_control(marker=N, value=X)" in config.PROMPT_SYSTEM
+        assert "滑块" in config.PROMPT_SYSTEM
+        assert "系统托盘" in config.PROMPT_SYSTEM  # 托盘图标可打开面板（泛化到音量/网络/亮度）
+        assert "音量/网络/亮度" in config.PROMPT_SYSTEM
 
     @patch('desktop_gui_agent.agent.model_client.process_vision_info')
     @patch('desktop_gui_agent.agent.model_client._load_local_model')
