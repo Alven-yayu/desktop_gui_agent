@@ -217,6 +217,15 @@ _TERMINAL_WINDOW_CLASSES = (
     "WTWindow",                      # Windows Terminal 旧类名
 )
 
+# 桌面/任务栏 shell 窗口类：这些属于 explorer.exe（Windows shell），
+# 绝不能当作"终端"最小化。桌面 shell 有两种形态（Progman / WorkerW），
+# 任务栏是 Shell_TrayWnd。
+_SHELL_WINDOW_CLASSES = (
+    "Progman",        # 桌面（Win10/11 经典形态）
+    "WorkerW",        # 桌面（Win11 形态）
+    "Shell_TrayWnd",  # 任务栏
+)
+
 
 def _is_terminal_window(hwnd) -> bool:
     """判断窗口是否属于已知终端类（Windows Terminal / 经典控制台）。"""
@@ -224,6 +233,16 @@ def _is_terminal_window(hwnd) -> bool:
         class_name = ctypes.create_unicode_buffer(256)
         ctypes.windll.user32.GetClassNameW(hwnd, class_name, 256)
         return class_name.value in _TERMINAL_WINDOW_CLASSES
+    except Exception:
+        return False
+
+
+def _is_shell_window(hwnd) -> bool:
+    """判断窗口是否属于桌面/任务栏 shell（绝不能最小化）。"""
+    try:
+        class_name = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetClassNameW(hwnd, class_name, 256)
+        return class_name.value in _SHELL_WINDOW_CLASSES
     except Exception:
         return False
 
@@ -251,6 +270,10 @@ def _minimize_windows_by_pids(pids: List[int]) -> int:
         )
         is_own_or_ancestor = process_id.value in pids_set
         is_terminal = _is_terminal_window(hwnd)
+        # 桌面/任务栏 shell 属于 explorer.exe，绝不能最小化（否则每步把桌面
+        # 顶回前台，打开应用后前台判定失真，模型误以为目标没打开而反复重试）。
+        if _is_shell_window(hwnd):
+            return True
         if is_own_or_ancestor or is_terminal:
             # 跳过太小的窗口（托盘图标等）
             rect = wintypes.RECT()

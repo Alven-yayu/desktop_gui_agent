@@ -258,11 +258,18 @@ class TaskManager:
 
     @staticmethod
     def _foreground_title() -> str:
-        """获取当前前台窗口标题（仅 Windows；失败返回空串）。"""
+        """获取当前前台窗口标题（仅 Windows；失败返回空串）。
+
+        终端是 agent 自身的运行环境，不该被当作"当前应用"。若前台是终端窗口，
+        返回空串（等价于桌面/无应用），避免守卫把终端标题（常含任务文本，
+        如"搜索"）误判成搜索界面等。
+        """
         try:
             import ctypes
             hwnd = ctypes.windll.user32.GetForegroundWindow()
             if not hwnd:
+                return ""
+            if _is_terminal_window(hwnd):
                 return ""
             length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
             buf = ctypes.create_unicode_buffer(length + 1)
@@ -1359,6 +1366,15 @@ class TaskManager:
                     fg_window_title = buf.value
                 except Exception:
                     pass
+
+                # 终端是 agent 自身的运行环境，即使被最小化，GetForegroundWindow
+                # 仍可能返回它（Claude Code 等终端会持续激活自己渲染输出）。此时
+                # 前台判定失真，模型会把"终端"当成当前应用、又因它是受保护窗口而
+                # 无从下手。把前台标题清空，让模型按桌面语义理解（终端已最小化、
+                # 不出现在截图里）。fg_hwnd 保留：下游安全警告仍能触发（终端始终
+                # 受保护，防止"关闭当前窗口"任务误关终端）。
+                if fg_hwnd and _is_terminal_window(fg_hwnd):
+                    fg_window_title = ""
 
                 # 桌面判断：前台是桌面 shell 即认为在桌面——无标题的 WorkerW，
                 # 或标题为 "Program Manager" 的 Progman（Win11 桌面 shell 有两种
