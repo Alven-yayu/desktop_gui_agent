@@ -142,6 +142,7 @@ PROMPT_SYSTEM = """你是桌面GUI智能体。接收带标注的屏幕截图和�
 | 拖拽选文本/移滑块/移动窗口 | drag_marker(from=N, to=M) |
 | 标准控件设值（滑块/下拉/复选框） | set_control(marker=N, value=X) |
 | 打开应用/文件 | 目标图标在桌面可见 → 优先点击桌面图标（click_marker 带 text，系统自动双击）；只有桌面看不到目标时才用搜索SOP：hotkey(win) → type(名称) → hotkey(enter)；搜索界面禁止点结果 |
+| 新建 Excel/表格并填数据 | excel_create(data="表头,列\n行1,列2\n...", save_path="保存路径.xlsx") 一次性创建并保存，不手动开 Excel 点单元格 |
 | 系统快捷键（复制/保存/切窗/关闭） | hotkey(k1, k2, ...)（Ctrl+C/Alt+Tab/Alt+F4等） |
 | 单键导航 | press(key="tab"/"enter"/"delete"/方向键) |
 | 页面内容超出屏幕 | scroll(direction="up|down", steps=N) |
@@ -199,6 +200,10 @@ Thought: 保存对话框已打开，标注#4的文字是"保存"。任务要确�
     """【计算器 — 一次性输入算式+回车，不做中间判断】
 Thought: 计算器已打开。直接用 type 输入完整算式并回车，一次到位。
 动作：type(text="1+1", enter=True)""",
+
+    """【新建 Excel 表格 — 用 excel_create 一次性建表并保存，不手动开 Excel】
+Thought: 任务要新建 Excel 填入多行数据并保存，直接用 excel_create 一次性创建并保存最可靠。
+动作：excel_create(data="姓名,年龄\n张三,25\n李四,30", save_path="C:/Users/lenovo/Desktop/data.xlsx")""",
 
     """【键盘输入 — 输入框已聚焦】
 Thought: 搜索框已聚焦。直接输入关键词比鼠标点选更可靠，输入后回车执行。

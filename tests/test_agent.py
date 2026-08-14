@@ -1289,8 +1289,39 @@ class TestTaskManagerDispatch:
             result = tm._dispatch(
                 {"action_type": "excel_create", "params": {"data": "A\nB\nC"}}
             )
-            mock_cwd.assert_called_once_with("A\nB\nC")
+            mock_cwd.assert_called_once_with("A\nB\nC", save_path="")
         assert result is True
+
+    def test_dispatch_excel_create_passes_save_path(self):
+        """excel_create 带 save_path 时应透传给 create_with_data"""
+        from unittest.mock import patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        tm = TaskManager()
+        with patch("desktop_gui_agent.control.excel_helper.create_with_data") as mock_cwd:
+            mock_cwd.return_value = True
+            result = tm._dispatch(
+                {"action_type": "excel_create",
+                 "params": {"data": "A\nB", "save_path": "C:/x.xlsx"}}
+            )
+            mock_cwd.assert_called_once_with("A\nB", save_path="C:/x.xlsx")
+        assert result is True
+
+    def test_dispatch_excel_create_blocks_repeat(self):
+        """excel_create 重复执行应被拦截，避免生成多个工作簿"""
+        from unittest.mock import patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        tm = TaskManager()
+        with patch("desktop_gui_agent.control.excel_helper.create_with_data") as mock_cwd:
+            mock_cwd.return_value = True
+            first = tm._dispatch(
+                {"action_type": "excel_create", "params": {"data": "A\nB"}}
+            )
+            second = tm._dispatch(
+                {"action_type": "excel_create", "params": {"data": "A\nB"}}
+            )
+            assert first is True
+            assert second is False  # 第二次被防重复守卫拦截
+            mock_cwd.assert_called_once()
 
 
 class TestBuildHistoryActions:

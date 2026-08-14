@@ -86,6 +86,7 @@ class TaskManager:
         self._last_type_text: str = ""  # 上一步 type 的文本（防重复输入守卫）
         self._last_type_enter: bool = False  # 上一步 type 是否带 enter
         self._initial_window: dict = {}  # 任务开始时的前台窗口锚点（关闭窗口守卫用）
+        self._excel_created = False  # 本任务是否已执行过 excel_create（防重复守卫）
         logger.info(
             f"TaskManager 初始化，max_steps={max_steps}，"
             f"max_consecutive_errors={max_consecutive_errors}"
@@ -475,6 +476,25 @@ class TaskManager:
         return any(k in task for k in ("计算", "算一下", "算出", "1+", "1-", "等于"))
 
     @staticmethod
+    def _is_excel_create_task(task: str) -> bool:
+        """判断任务是否是"新建/创建 Excel 表格"类任务（应用 excel_create 一次性创建）。
+
+        只匹配明确要"新建/创建"Excel/表格的任务；"打开/查看/编辑已有 Excel"
+        走通用流程不触发，避免把 excel_create 当成万能解而破坏泛化性。
+
+        Args:
+            task: 用户任务文本。
+
+        Returns:
+            True 表示是新建 Excel 填数据任务。
+        """
+        if not task:
+            return False
+        if not any(k in task for k in ("excel", "Excel", "表格", "工作簿", "电子表格")):
+            return False
+        return any(k in task for k in ("新建", "创建", "建表"))
+
+    @staticmethod
     def _is_calculator_button(info: dict) -> bool:
         """判断标注是否属于计算器按键（数字/运算符/等于等）。
 
@@ -654,10 +674,23 @@ class TaskManager:
         elif action_type == "press":
             return self.keyboard.press(params["key"])
         elif action_type == "excel_create":
-            # Excel 专门自动化：COM 直接创建带数据的工作簿
+            # Excel 专门自动化：COM 直接创建带数据的工作簿（可一并保存）
             from desktop_gui_agent.control.excel_helper import create_with_data
+            # 防重复守卫：excel_create 是一次性"建表(+保存)"动作，重复执行会
+            # 生成多个工作簿/文件。已执行过就拦截，引导模型直接 finish。
+            if self._excel_created:
+                self._bad_marker_hint = (
+                    "【!!! 纠正 — 不要重复 excel_create !!!】\n"
+                    "你已经用 excel_create 创建过表格了，数据已填入。\n"
+                    "请直接观察屏幕确认结果，然后 finish，不要再创建。\n\n"
+                )
+                logger.warning("[ExcelGuard] 拦截重复 excel_create")
+                return False
+            self._excel_created = True
             logger.info(f"[Excel] excel_create 数据: {params['data'][:80]}...")
-            return create_with_data(params["data"])
+            return create_with_data(
+                params["data"], save_path=params.get("save_path", "")
+            )
         elif action_type in ("set_slider", "set_control"):
             # 通过 UIA 直接设标准控件值（滑块/输入框/复选/下拉/单选），
             # 不依赖鼠标精确点击。set_slider 是 set_control 的兼容别名。
@@ -1265,6 +1298,7 @@ class TaskManager:
         # 每次任务重置防重复输入守卫状态
         self._last_type_text = ""
         self._last_type_enter = False
+        self._excel_created = False
 
         # 终端窗口避让：先尝试最小化，失败则自动裁剪
         # （每次 run() 调用时执行一次，防止 OCR 自干扰）
@@ -1508,6 +1542,32 @@ class TaskManager:
                 if "计算器" in fg_window_title or "计算器" in task:
                     calc_hint = self._calculator_display_hint()
 
+                # Excel 建表任务：模型常走"手动开 Excel 逐格输入"的慢路径
+                # （单元格密集、导航不可靠，容易幻觉单元格编号）。excel_create
+                # 用 COM 一次性建表更可靠。此提示只在任务匹配"新建 Excel"且尚未
+                # 用 excel_create 时注入，用后即消失——窄范围专门优化，不干扰其他任务。
+                excel_hint = ""
+                if (self._is_excel_create_task(task)
+                        and not any(h.get("action_type") == "excel_create" for h in history)):
+                    save_tip = ""
+                    if "保存" in task or "桌面" in task:
+                        try:
+                            desktop_p = os.path.expanduser("~/Desktop").replace("\\", "/")
+                            save_tip = (
+                                f"；任务要求保存到桌面，请在 excel_create 里加 "
+                                f"save_path=\"{desktop_p}/data.xlsx\""
+                            )
+                        except Exception:
+                            pass
+                    excel_hint = (
+                        "【!!! 任务提示 — 用 excel_create 一次性建表并保存 !!!】\n"
+                        "这是新建 Excel 表格并填数据的任务。请直接输出 "
+                        "excel_create(data=\"...\", save_path=\"...\") 一次性创建并保存"
+                        "（data 每行用\\n分隔、列用逗号分隔）" + save_tip + "。\n"
+                        "不要手动打开 Excel、不要逐格点击或导航单元格"
+                        "、不要用 ctrl+s 走保存对话框。\n\n"
+                    )
+
                 # 上一步模型输出了无效标注编号 → 注入针对性纠正提示
                 bad_marker_hint = self._bad_marker_hint
                 self._bad_marker_hint = ""  # 用后重置，避免重复
@@ -1528,6 +1588,7 @@ class TaskManager:
                     anchor_extra +
                     cursor_line +
                     path_line +
+                    excel_hint +
                     calc_hint +
                     f"【当前前台窗口】{fg_window_title}\n"
                 )

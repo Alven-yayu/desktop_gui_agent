@@ -9,6 +9,8 @@
     create_with_data("姓名,年龄\\n张三,25\\n李四,30")
     会创建 Excel 工作簿并在 A1:B3 填入上述数据。
 """
+import os
+
 import win32com.client
 
 from desktop_gui_agent.utils.logger import get_logger
@@ -46,6 +48,8 @@ def create_with_data(data: str, save_path: str = "") -> bool:
                     sheet.Cells(row_idx, col_idx).Value = val
 
         if save_path:
+            # 归一化路径分隔符（模型常输出正斜杠），避免 Excel SaveAs 误读
+            save_path = os.path.normpath(save_path)
             workbook.SaveAs(save_path)
             logger.info(f"Excel 已保存: {save_path}")
 
