@@ -12,6 +12,7 @@
 import atexit
 import random
 import time
+import weakref
 from typing import Optional, Set
 
 from pynput.keyboard import Controller, Key
@@ -22,10 +23,25 @@ from desktop_gui_agent.config import (
     KEYBOARD_SCROLL_STEP,
     KEYBOARD_TYPE_DELAY,
 )
-from desktop_gui_agent.utils.exceptions import ControlError
 from desktop_gui_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# 所有 KeyboardController 实例的弱引用集合：进程退出时统一释放按键。
+# 用 weakref 避免每个实例各注册一个 atexit 回调（堆积 + 强引用泄漏）。
+_instances = weakref.WeakSet()
+
+
+def _release_all_on_exit() -> None:
+    """atexit 保底：释放所有存活实例的按键，防止键盘被"占住"。"""
+    for kb in list(_instances):
+        try:
+            kb._release_all()
+        except Exception:
+            pass
+
+
+atexit.register(_release_all_on_exit)
 
 # 特殊按键名到 pynput Key 枚举的映射
 _KEY_MAP: dict = {
@@ -106,8 +122,8 @@ class KeyboardController:
         self._keyboard = Controller()
         self._mouse = MouseScrollController()
         self._pressed_keys: Set = set()
-        # 注册 atexit 保底释放：即使程序崩溃，也尽力释放所有按键
-        atexit.register(self._release_all)
+        # 加入弱引用集合：由模块级唯一的 atexit 回调统一释放，不每个实例注册
+        _instances.add(self)
         logger.info("键盘控制器初始化完成")
 
     def __enter__(self) -> "KeyboardController":

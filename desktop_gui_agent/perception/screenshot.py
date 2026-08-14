@@ -28,6 +28,17 @@ logger = get_logger(__name__)
 # 缓存当前进程窗口的屏幕矩形（用于裁剪回退方案）
 _own_window_rects: List[Tuple[int, int, int, int]] = []
 
+# mss 实例懒加载单例：capture() 每步调用多次，复用实例避免每次重新枚举显示器
+_mss_instance = None
+
+
+def _get_mss():
+    """返回复用的 mss 实例（首次调用时创建）。"""
+    global _mss_instance
+    if _mss_instance is None:
+        _mss_instance = mss.mss()
+    return _mss_instance
+
 
 # ===== 终端窗口控制（Windows）=====
 
@@ -379,18 +390,18 @@ def capture(
     Returns:
         截图的 PIL Image 对象。
     """
-    with mss.mss() as sct:
-        monitor = sct.monitors[screen_id]
-        if region is not None:
-            x, y, width, height = region
-            monitor = {
-                "top": monitor["top"] + y,
-                "left": monitor["left"] + x,
-                "width": width,
-                "height": height,
-            }
-        screenshot = sct.grab(monitor)
-        img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
+    sct = _get_mss()
+    monitor = sct.monitors[screen_id]
+    if region is not None:
+        x, y, width, height = region
+        monitor = {
+            "top": monitor["top"] + y,
+            "left": monitor["left"] + x,
+            "width": width,
+            "height": height,
+        }
+    screenshot = sct.grab(monitor)
+    img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
 
     # 如果终端最小化失败，走裁剪回退方案
     if crop_own_windows:

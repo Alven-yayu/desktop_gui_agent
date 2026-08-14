@@ -16,7 +16,6 @@ from desktop_gui_agent.config import (
     MOUSE_DRAG_DURATION,
     MOUSE_MOVE_DURATION,
 )
-from desktop_gui_agent.utils.exceptions import ControlError
 from desktop_gui_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)

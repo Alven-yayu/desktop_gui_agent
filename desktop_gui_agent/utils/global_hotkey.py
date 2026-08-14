@@ -13,6 +13,7 @@
 """
 import atexit
 import threading
+import weakref
 from typing import Callable, Optional
 
 from pynput.keyboard import Key, KeyCode, Listener
@@ -20,6 +21,22 @@ from pynput.keyboard import Key, KeyCode, Listener
 from desktop_gui_agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# 所有 GlobalHotkey 实例的弱引用集合：进程退出时统一停止监听，
+# 避免每个实例各注册一个 atexit 回调（堆积 + 强引用泄漏）。
+_instances = weakref.WeakSet()
+
+
+def _stop_all_on_exit() -> None:
+    """atexit 保底：停止所有存活实例的键盘监听。"""
+    for hk in list(_instances):
+        try:
+            hk.stop()
+        except Exception:
+            pass
+
+
+atexit.register(_stop_all_on_exit)
 
 # Ctrl+Alt+Q 的虚拟键码
 _VK_Q = 0x51
@@ -53,6 +70,7 @@ class GlobalHotkey:
         self._lock = threading.Lock()
         self._listener: Optional[Listener] = None
         self._thread: Optional[threading.Thread] = None
+        _instances.add(self)
 
     # ---- 公开 API ----
 
@@ -78,8 +96,6 @@ class GlobalHotkey:
             name="global-hotkey",
         )
         self._thread.start()
-        # 注册 atexit 保底：即使异常退出也能清理键盘钩子
-        atexit.register(self.stop)
         logger.info("全局快捷键监听已启动（Ctrl+Alt+Q 退出）")
 
     def stop(self) -> None:

@@ -59,15 +59,6 @@ def classify_error(exception: Exception) -> ErrorCategory:
     Returns:
         ErrorCategory 枚举值。
     """
-    # 延迟导入避免循环依赖
-    from desktop_gui_agent.utils.exceptions import (
-        ControlError,
-        ModelError,
-        OCRError,
-        ScreenshotError,
-        UILocatorError,
-    )
-
     # RETRYABLE: 截图失败
     if isinstance(exception, ScreenshotError):
         return ErrorCategory.RETRYABLE

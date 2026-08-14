@@ -82,8 +82,8 @@ def _ocr_image(image_b64: str):
     elements = []
     if result and result[0]:
         for box, (text, conf) in result[0]:
-            if conf < 0.5:
-                continue
+            # 置信度过滤统一在主进程按 OCR_CONFIDENCE_THRESHOLD 做，
+            # 这里不过滤（避免两处阈值硬编码不同步）
             x1, y1 = box[0]
             x2, y2 = box[2]
             elements.append({
