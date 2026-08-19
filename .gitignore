@@ -37,6 +37,10 @@ week1.docx
 pip_cache/
 test_env.py
 
+# 项目汇报材料（不提交）
+*.pptx
+gen_*.py
+
 # 测试缓存
 .pytest_cache/
 
