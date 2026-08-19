@@ -67,13 +67,6 @@ _PATTERN_SET_CONTROL = re.compile(
     re.IGNORECASE,
 )
 
-# Excel 专门自动化：一次输出整张表格数据（行=换行\n，列=逗号）。
-# save_path 可选：提供则直接保存到该路径，绕开脆弱的 UI 保存流程。
-_PATTERN_EXCEL_CREATE = re.compile(
-    r'(?<!_)excel_create\s*\(\s*data\s*=\s*"(.*?)"(?:\s*,\s*save_path\s*=\s*"([^"]*)")?\s*\)',
-    re.IGNORECASE | re.DOTALL,
-)
-
 # 传统坐标动作（兼容旧版，不推荐）
 _PATTERN_DOUBLE_CLICK = re.compile(
     r'double_click\s*\(\s*x\s*=\s*(-?\d+)\s*,\s*y\s*=\s*(-?\d+)\s*\)',
@@ -225,19 +218,6 @@ def _build_set_control_params(match: re.Match) -> Dict[str, Any]:
     return {"marker": marker, "value": value}
 
 
-def _build_excel_create_params(match: re.Match) -> Dict[str, str]:
-    """从正则匹配结果构建 excel_create 参数字典。
-
-    把字面量 \\n 转成真正的换行（模型输出时用 \\n 表示换行）。
-    save_path 可选：提供则一并保存（含 .xlsx），不提供则只创建不保存。
-    """
-    data = match.group(1).replace("\\n", "\n")
-    params = {"data": data}
-    if match.group(2):
-        params["save_path"] = match.group(2)
-    return params
-
-
 def _build_double_click_params(match: re.Match) -> Dict[str, int]:
     """从正则匹配结果构建 double_click 参数字典。"""
     return {"x": int(match.group(1)), "y": int(match.group(2))}
@@ -301,7 +281,6 @@ _PARSERS = [
     (_PATTERN_DRAG, "drag", _build_drag_params),
     (_PATTERN_SET_SLIDER, "set_slider", _build_set_slider_params),
     (_PATTERN_SET_CONTROL, "set_control", _build_set_control_params),
-    (_PATTERN_EXCEL_CREATE, "excel_create", _build_excel_create_params),
     (_PATTERN_PRESS, "press", _build_press_params),
     # 传统坐标动作（兼容）
     (_PATTERN_DOUBLE_CLICK, "double_click", _build_double_click_params),

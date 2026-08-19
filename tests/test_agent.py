@@ -417,22 +417,6 @@ class TestActionParser:
         result = parse("set_control(marker=5, value=\"on\")")
         assert result["action_type"] == "set_control"
 
-    # ---- excel_create（Excel 专门自动化）----
-    def test_parse_excel_create(self):
-        """excel_create 解析，\\n 应转成真实换行"""
-        from desktop_gui_agent.agent.action_parser import parse
-        result = parse('excel_create(data="第一行\\n第二行\\n第三行")')
-        assert result["action_type"] == "excel_create"
-        assert result["params"]["data"] == "第一行\n第二行\n第三行"
-
-    def test_parse_excel_create_with_columns(self):
-        """excel_create 带列数据"""
-        from desktop_gui_agent.agent.action_parser import parse
-        result = parse('excel_create(data="姓名,年龄\\n张三,25")')
-        assert result["action_type"] == "excel_create"
-        assert result["params"]["data"] == "姓名,年龄\n张三,25"
-
-
 # ===== ModelClient 测试 =====
 from unittest.mock import patch, MagicMock
 from PIL import Image
@@ -1068,6 +1052,11 @@ class TestTaskManagerDispatch:
         assert tm._extract_open_target("打开桌面上的测试文档.txt") == ""
         assert tm._extract_open_target("关闭当前窗口") == ""
         assert tm._extract_open_target("") == ""
+        # "新建 Excel"类任务：目标应用是 Excel（需先打开 Excel）
+        assert tm._extract_open_target("新建一个 Excel 表格，填入数据") == "Excel"
+        assert tm._extract_open_target("新建表格并保存") == "Excel"
+        assert tm._extract_open_target("创建 Excel 工作簿") == "Excel"
+        assert tm._extract_open_target("新建文件夹") == ""  # 非 Excel，不误伤
 
     def test_relates_to_open_target_generic_browser(self):
         """目标"浏览器"→ Chrome/Edge/浏览器 都相关（泛称类别匹配）"""
@@ -1278,50 +1267,6 @@ class TestTaskManagerDispatch:
         assert result is None
         assert "99" in tm._bad_marker_hint
         assert "打开应用" in tm._bad_marker_hint
-
-    def test_dispatch_excel_create_calls_helper(self):
-        """excel_create 应调用 excel_helper.create_with_data"""
-        from unittest.mock import patch
-        from desktop_gui_agent.agent.task_manager import TaskManager
-        tm = TaskManager()
-        with patch("desktop_gui_agent.control.excel_helper.create_with_data") as mock_cwd:
-            mock_cwd.return_value = True
-            result = tm._dispatch(
-                {"action_type": "excel_create", "params": {"data": "A\nB\nC"}}
-            )
-            mock_cwd.assert_called_once_with("A\nB\nC", save_path="")
-        assert result is True
-
-    def test_dispatch_excel_create_passes_save_path(self):
-        """excel_create 带 save_path 时应透传给 create_with_data"""
-        from unittest.mock import patch
-        from desktop_gui_agent.agent.task_manager import TaskManager
-        tm = TaskManager()
-        with patch("desktop_gui_agent.control.excel_helper.create_with_data") as mock_cwd:
-            mock_cwd.return_value = True
-            result = tm._dispatch(
-                {"action_type": "excel_create",
-                 "params": {"data": "A\nB", "save_path": "C:/x.xlsx"}}
-            )
-            mock_cwd.assert_called_once_with("A\nB", save_path="C:/x.xlsx")
-        assert result is True
-
-    def test_dispatch_excel_create_blocks_repeat(self):
-        """excel_create 重复执行应被拦截，避免生成多个工作簿"""
-        from unittest.mock import patch
-        from desktop_gui_agent.agent.task_manager import TaskManager
-        tm = TaskManager()
-        with patch("desktop_gui_agent.control.excel_helper.create_with_data") as mock_cwd:
-            mock_cwd.return_value = True
-            first = tm._dispatch(
-                {"action_type": "excel_create", "params": {"data": "A\nB"}}
-            )
-            second = tm._dispatch(
-                {"action_type": "excel_create", "params": {"data": "A\nB"}}
-            )
-            assert first is True
-            assert second is False  # 第二次被防重复守卫拦截
-            mock_cwd.assert_called_once()
 
 
 class TestBuildHistoryActions:
@@ -2987,6 +2932,24 @@ class TestCalculatorDisplayHint:
         with patch("desktop_gui_agent.perception.uia_parser.UiaParser.get_foreground_controls",
                    return_value=fake_controls):
             hint = TaskManager._calculator_display_hint()
+        assert hint == ""
+
+    def test_excel_active_cell_hint_reads_address(self):
+        """Excel 激活单元格地址注入：COM 读到 B1 时返回提示"""
+        from unittest.mock import MagicMock, patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        mock_excel = MagicMock()
+        mock_excel.ActiveCell.Address = "$B$1"
+        with patch("win32com.client.GetActiveObject", return_value=mock_excel):
+            hint = TaskManager._excel_active_cell_hint()
+        assert hint == "【Excel 状态】当前激活单元格：B1\n"
+
+    def test_excel_active_cell_hint_no_excel_returns_empty(self):
+        """Excel 未打开（GetActiveObject 抛异常）时返回空串"""
+        from unittest.mock import patch
+        from desktop_gui_agent.agent.task_manager import TaskManager
+        with patch("win32com.client.GetActiveObject", side_effect=Exception("no excel")):
+            hint = TaskManager._excel_active_cell_hint()
         assert hint == ""
 
 

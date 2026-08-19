@@ -40,8 +40,8 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=20,
-        help="最大操作步数（默认 20）",
+        default=30,
+        help="最大操作步数（默认 30）",
     )
     parser.add_argument(
         "--max-errors",

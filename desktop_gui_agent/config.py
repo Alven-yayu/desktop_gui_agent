@@ -78,7 +78,7 @@ API_PRESETS = {
 }
 
 # ===== Agent 主循环配置 =====
-AGENT_MAX_STEPS = 20  # 默认最大步数上限
+AGENT_MAX_STEPS = 30  # 默认最大步数上限（Excel 逐格填+保存需更多步）
 AGENT_MAX_CONSECUTIVE_ERRORS = 3  # 连续错误次数阈值，超限则终止
 AGENT_STEP_DELAY = (0.5, 2.0)  # 步骤间随机延迟范围 (min, max)，单位秒
 
@@ -142,7 +142,6 @@ PROMPT_SYSTEM = """你是桌面GUI智能体。接收带标注的屏幕截图和�
 | 拖拽选文本/移滑块/移动窗口 | drag_marker(from=N, to=M) |
 | 标准控件设值（滑块/下拉/复选框） | set_control(marker=N, value=X) |
 | 打开应用/文件 | 目标图标在桌面可见 → 优先点击桌面图标（click_marker 带 text，系统自动双击）；只有桌面看不到目标时才用搜索SOP：hotkey(win) → type(名称) → hotkey(enter)；搜索界面禁止点结果 |
-| 新建 Excel/表格并填数据 | excel_create(data="表头,列\n行1,列2\n...", save_path="保存路径.xlsx") 一次性创建并保存，不手动开 Excel 点单元格 |
 | 系统快捷键（复制/保存/切窗/关闭） | hotkey(k1, k2, ...)（Ctrl+C/Alt+Tab/Alt+F4等） |
 | 单键导航 | press(key="tab"/"enter"/"delete"/方向键) |
 | 页面内容超出屏幕 | scroll(direction="up|down", steps=N) |
@@ -169,7 +168,10 @@ PROMPT_SYSTEM = """你是桌面GUI智能体。接收带标注的屏幕截图和�
 - 文件对话框：hotkey(ctrl, s) 打开保存，hotkey(ctrl, l) 地址栏输入完整路径导航，避免点侧边栏
 - 快捷键：任务提到 Ctrl+X/复制/保存/关闭窗口 → 直接转 hotkey，不找按钮点
   （hotkey(ctrl, s) 保存 / hotkey(alt, f4) 关闭窗口 / hotkey(ctrl, v) 粘贴）
-- Excel/表格：用 excel_create(data="...") 一次性创建（行\n分隔、列逗号分隔），不手动开Excel点单元格
+- Excel 填数据：先打开 Excel——用 hotkey(win) → type(excel) → hotkey(enter) 搜索打开，
+  不要点开始菜单/搜索界面里的图标（点选不可靠）。打开后若有「空白工作簿」就点它进入网格。
+  填数据用 type(text="...") 输入当前激活格，输完一格用 press(key="tab"/"right"/"down"/"enter")
+  移到相邻格继续 type，不要点单元格编号。全部填完 hotkey(ctrl, s) 保存。
 - 上一步无效 → 换方法，禁止重复同一动作
 - 验证驱动：每步后观察屏幕判断是否生效；finish 前必须确认最终结果显示在屏幕上，禁止谎报
 
@@ -201,9 +203,9 @@ Thought: 保存对话框已打开，标注#4的文字是"保存"。任务要确�
 Thought: 计算器已打开。直接用 type 输入完整算式并回车，一次到位。
 动作：type(text="1+1", enter=True)""",
 
-    """【新建 Excel 表格 — 用 excel_create 一次性建表并保存，不手动开 Excel】
-Thought: 任务要新建 Excel 填入多行数据并保存，直接用 excel_create 一次性创建并保存最可靠。
-动作：excel_create(data="姓名,年龄\n张三,25\n李四,30", save_path="C:/Users/lenovo/Desktop/data.xlsx")""",
+    """【Excel 逐格填数据 — 用方向键移格，不点单元格】
+Thought: Excel 空白工作簿已打开，A1 激活。任务要填入姓名，直接在当前格输入，输完用方向键移格。
+动作：type(text="姓名")""",
 
     """【键盘输入 — 输入框已聚焦】
 Thought: 搜索框已聚焦。直接输入关键词比鼠标点选更可靠，输入后回车执行。

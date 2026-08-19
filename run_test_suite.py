@@ -55,8 +55,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
         choices=["local", "dashscope", "ollama"],
         help="推理后端（默认 dashscope=云端 qwen-vl-plus，效果最好）",
     )
-    parser.add_argument("--max-steps", type=int, default=20,
-                        help="每个任务最大步数（默认 20）")
+    parser.add_argument("--max-steps", type=int, default=30,
+                        help="每个任务最大步数（默认 30）")
     parser.add_argument("--only", type=str, default=None,
                         help="只跑指定编号，逗号分隔，如 1,3,6")
     parser.add_argument("--auto", action="store_true",
